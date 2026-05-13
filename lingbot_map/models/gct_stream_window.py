@@ -168,6 +168,8 @@ class GCTStream(GCTBase):
         use_gradient_checkpoint: bool = True,
         # Camera head iterative refinement (lower = faster inference; default 4)
         camera_num_iterations: int = 4,
+        # Window size for memory optimization (windowed mode)
+        window_size: int = None,
     ):
         """
         Initialize GCTStream.
@@ -206,6 +208,7 @@ class GCTStream(GCTBase):
         self.enable_stream_inference = enable_stream_inference
         self.enable_3d_rope = enable_3d_rope
         self.max_frame_num = max_frame_num
+        self.window_size = window_size
         # Camera head 3D RoPE settings
         self.enable_camera_3d_rope = enable_camera_3d_rope
         self.camera_rope_theta = camera_rope_theta
@@ -258,6 +261,7 @@ class GCTStream(GCTBase):
             enable_stream_inference=self.enable_stream_inference,
             enable_3d_rope=self.enable_3d_rope,
             max_frame_num=self.max_frame_num,
+            window_size=self.window_size,
             # Backend: FlashInfer (default) or SDPA (fallback)
             use_flashinfer=not self.use_sdpa,
             use_sdpa=self.use_sdpa,

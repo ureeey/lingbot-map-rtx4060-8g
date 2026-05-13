@@ -159,6 +159,48 @@ class PointCloudViewer:
         depth_map = pred_dict.get("depth")  # (S, H, W, 1)
         depth_conf = pred_dict.get("depth_conf")  # (S, H, W)
 
+        if 0:
+        # Debug: Print detailed depth_map information
+            if depth_map is not None:
+                print(f"[DEBUG] depth_map type: {type(depth_map)}")
+                print(f"[DEBUG] depth_map shape: {depth_map.shape}")
+                print(f"[DEBUG] depth_map dtype: {depth_map.dtype}")
+                print(f"[DEBUG] depth_map min: {depth_map.min():.6f}")
+                print(f"[DEBUG] depth_map max: {depth_map.max():.6f}")
+                print(f"[DEBUG] depth_map mean: {depth_map.mean():.6f}")
+                print(f"[DEBUG] depth_map std: {depth_map.std():.6f}")
+                print(f"[DEBUG] depth_map median: {np.median(depth_map):.6f}")
+                
+                # Check for invalid values
+                nan_count = np.isnan(depth_map).sum()
+                inf_count = np.isinf(depth_map).sum()
+                zero_count = (depth_map == 0).sum()
+                total_elements = depth_map.size
+                
+                print(f"[DEBUG] depth_map NaN count: {nan_count} ({nan_count/total_elements*100:.2f}%)")
+                print(f"[DEBUG] depth_map Inf count: {inf_count} ({inf_count/total_elements*100:.2f}%)")
+                print(f"[DEBUG] depth_map Zero count: {zero_count} ({zero_count/total_elements*100:.2f}%)")
+                print(f"[DEBUG] depth_map Valid (>0) count: {(depth_map > 0).sum()} ({(depth_map > 0).sum()/total_elements*100:.2f}%)")
+                
+                # Print statistics per frame
+                S = depth_map.shape[0]
+                print(f"[DEBUG] depth_map has {S} frames")
+                for i in range(min(5, S)):  # Print first 5 frames
+                    frame_depth = depth_map[i].squeeze()
+                    print(f"  Frame {i}: shape={frame_depth.shape}, min={frame_depth.min():.4f}, "
+                        f"max={frame_depth.max():.4f}, mean={frame_depth.mean():.4f}, "
+                        f"valid={(frame_depth > 0).sum()}/{frame_depth.size}")
+                
+                # Print sample values from first frame
+                if S > 0:
+                    sample_frame = depth_map[0].squeeze()
+                    h, w = sample_frame.shape
+                    print(f"[DEBUG] Sample values from frame 0 (center region [{h//2-2}:{h//2+2}, {w//2-2}:{w//2+2}]):")
+                    center_region = sample_frame[h//2-2:h//2+2, w//2-2:w//2+2]
+                    print(center_region)
+            else:
+                print("[DEBUG] depth_map is None")
+
         extrinsics_cam = pred_dict["extrinsic"]  # (S, 3, 4)
         intrinsics_cam = pred_dict["intrinsic"]  # (S, 3, 3)
 
@@ -169,6 +211,24 @@ class PointCloudViewer:
         else:
             world_points = pred_dict["world_points"]  # (S, H, W, 3)
             conf = pred_dict.get("world_points_conf", depth_conf)  # (S, H, W)
+        
+        if 0:
+            # Debug: Print world_points and conf statistics
+            print(f"[DEBUG] world_points shape: {world_points.shape}")
+            print(f"[DEBUG] world_points range: [{world_points.min():.4f}, {world_points.max():.4f}]")
+            print(f"[DEBUG] world_points mean: {world_points.mean():.4f}")
+            print(f"[DEBUG] world_points has NaN: {np.isnan(world_points).any()}")
+            print(f"[DEBUG] world_points has Inf: {np.isinf(world_points).any()}")
+            
+            if conf is not None:
+                print(f"[DEBUG] conf shape: {conf.shape}")
+                print(f"[DEBUG] conf range: [{conf.min():.4f}, {conf.max():.4f}]")
+                print(f"[DEBUG] conf mean: {conf.mean():.4f}")
+                print(f"[DEBUG] conf std: {conf.std():.4f}")
+                print(f"[DEBUG] conf has NaN: {np.isnan(conf).any()}")
+                print(f"[DEBUG] conf > 0 ratio: {(conf > 0).mean():.2%}")
+            else:
+                print("[DEBUG] conf is None")
 
         # Apply sky segmentation if enabled
         if mask_sky:
@@ -221,6 +281,35 @@ class PointCloudViewer:
             "R": [cam_to_world_mat[i, :3, :3] for i in range(S)],
             "t": [cam_to_world_mat[i, :3, 3] for i in range(S)],
         }
+
+        if 0:
+            # Debug: Print final output statistics
+            print(f"[DEBUG] Final pc_list length: {len(pc_list)}")
+            print(f"[DEBUG] Final color_list length: {len(color_list)}")
+            print(f"[DEBUG] Final conf_list length: {len(conf_list)}")
+        
+            for i in range(min(3, len(pc_list))):  # Print first 3 frames as samples
+                print(f"  Frame {i}:")
+                print(f"    pc shape: {pc_list[i].shape}, dtype: {pc_list[i].dtype}")
+                if pc_list[i].size > 0:
+                    print(f"    pc range: [{pc_list[i].min():.4f}, {pc_list[i].max():.4f}]")
+                print(f"    color shape: {color_list[i].shape}, dtype: {color_list[i].dtype}")
+                if color_list[i].size > 0:
+                    print(f"    color range: [{color_list[i].min():.4f}, {color_list[i].max():.4f}]")
+                print(f"    conf shape: {conf_list[i].shape}, dtype: {conf_list[i].dtype}")
+                if conf_list[i].size > 0:
+                    print(f"    conf range: [{conf_list[i].min():.4f}, {conf_list[i].max():.4f}], mean: {conf_list[i].mean():.4f}")
+            
+            print(f"[DEBUG] cam_dict keys: {list(cam_dict.keys())}")
+            print(f"[DEBUG] cam_dict['focal'] length: {len(cam_dict['focal'])}")
+            print(f"[DEBUG] cam_dict['pp'] length: {len(cam_dict['pp'])}")
+            print(f"[DEBUG] cam_dict['R'] length: {len(cam_dict['R'])}")
+            print(f"[DEBUG] cam_dict['t'] length: {len(cam_dict['t'])}")
+            if len(cam_dict['focal']) > 0:
+                print(f"  Sample focal[0]: {cam_dict['focal'][0]}")
+                print(f"  Sample pp[0]: {cam_dict['pp'][0]}")
+                print(f"  Sample R[0] shape: {cam_dict['R'][0].shape}")
+                print(f"  Sample t[0] shape: {cam_dict['t'][0].shape}")
 
         return pc_list, color_list, conf_list, cam_dict
 

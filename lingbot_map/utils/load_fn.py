@@ -101,7 +101,7 @@ def load_and_preprocess_images_square(image_path_list, target_size=1024):
     return images, original_coords
 
 
-def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=None, mode="crop", image_size=512, patch_size=16):
+def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=None, mode="crop", image_size=512, patch_size=16, param_max_height=None):
     """
     A quick start function to load and preprocess images for model input.
     This assumes the images should have the same shape for easier batching, but our model can also work well with different shapes.
@@ -179,6 +179,10 @@ def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=No
         if mode == "crop" and new_height > target_size:
             start_y = (new_height - target_size) // 2
             img = img[:, start_y : start_y + target_size, :]
+
+        if param_max_height is not None and img.shape[1] > param_max_height:
+            start_y = (img.shape[1] - param_max_height) // 2
+            img = img[:, start_y : start_y + param_max_height, :]
 
         if fx is not None:
             fx_val = fx_val * new_width / width

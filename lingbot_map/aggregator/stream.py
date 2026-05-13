@@ -47,6 +47,8 @@ class AggregatorStream(AggregatorBase):
         kv_cache_cross_frame_special: bool = True,
         kv_cache_include_scale_frames: bool = True,
         kv_cache_camera_only: bool = False,
+        # Window size for memory optimization (windowed mode)
+        window_size: int = None,
         # Base class parameters via **kwargs
         **kwargs
     ):
@@ -75,6 +77,7 @@ class AggregatorStream(AggregatorBase):
         self.attend_to_scale_frames = attend_to_scale_frames
         self.enable_3d_rope = enable_3d_rope
         self.max_frame_num = max_frame_num
+        self.window_size = window_size
         # KV cache parameters
         self.kv_cache_sliding_window = kv_cache_sliding_window
         self.kv_cache_scale_frames = kv_cache_scale_frames
@@ -226,6 +229,7 @@ class AggregatorStream(AggregatorBase):
                 max_total_frames=self.max_frame_num + 100,
                 force_fp32=getattr(self, 'kv_cache_force_fp32', False),
                 fa3=getattr(self, 'kv_cache_fa3', False),
+                window_size=self.window_size,
             )
             logger.info(
                 f"FlashInfer KV cache manager initialized: {self.depth} blocks, "

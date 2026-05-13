@@ -55,7 +55,7 @@ from lingbot_map.utils.load_fn import load_and_preprocess_images
 
 def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png,.JPG",
                 first_k=None, stride=1, image_size=518, patch_size=14, num_workers=8,
-                rotate_clockwise_90=False):
+                rotate_clockwise_90=False, max_height=None):
     """Load images from folder or video and preprocess into a tensor.
 
     Returns:
@@ -118,6 +118,7 @@ def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png
         mode="crop",
         image_size=image_size,
         patch_size=patch_size,
+        param_max_height=max_height,
     )
     h, w = images.shape[-2:]
     print(f"Preprocessed images to {w}x{h} using canonical crop mode")
@@ -135,6 +136,27 @@ def load_model(args, device):
     else:
         from lingbot_map.models.gct_stream import GCTStream
 
+    # For windowed mode, pass window_size to optimize KV cache allocation
+    window_size = None
+    if getattr(args, "mode", "streaming") == "windowed":
+        # Calculate actual window size based on parameters
+        ws = args.num_scale_frames if hasattr(args, 'num_scale_frames') else 8
+        window_size_param = getattr(args, 'window_size', 64)
+        keyframe_interval = getattr(args, 'keyframe_interval', 1)
+        # Handle None case for keyframe_interval
+        if keyframe_interval is None:
+            keyframe_interval = 1
+        phase2_kf = max(window_size_param - ws, 0)
+        phase2_frames = phase2_kf * max(keyframe_interval, 1)
+        window_size = ws + phase2_frames
+        print(f"[Window Size Calculation]")
+        print(f"  window_size_param (--window_size): {window_size_param}")
+        print(f"  num_scale_frames: {ws}")
+        print(f"  keyframe_interval: {keyframe_interval}")
+        print(f"  phase2_kf: {phase2_kf}")
+        print(f"  phase2_frames: {phase2_frames}")
+        print(f"  window_size (actual frames): {window_size}")
+
     print("Building model...")
     model = GCTStream(
         img_size=args.image_size,
@@ -147,11 +169,15 @@ def load_model(args, device):
         kv_cache_include_scale_frames=True,
         use_sdpa=args.use_sdpa,
         camera_num_iterations=args.camera_num_iterations,
+        window_size=window_size,
     )
 
     if args.model_path:
         print(f"Loading checkpoint: {args.model_path}")
-        ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
+        # 1. 先在CPU加载权重，避免GPU显存峰值，注意mmap选项，小心CPU内存都不够
+        ckpt = torch.load(args.model_path, map_location="cpu", weights_only=False, mmap=True)
+        #ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
+        print("  After torch.load(...).")
         state_dict = ckpt.get("model", ckpt)
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
@@ -160,8 +186,11 @@ def load_model(args, device):
             print(f"  Unexpected keys: {len(unexpected)}")
         print("  Checkpoint loaded.")
 
-    return model.to(device).eval()
+    # 2. 移动到设备
+    model = model.to(device)
+    return model.eval()
 
+    #return model.to(device).eval()
 
 # =============================================================================
 # torch.compile (opt-in via --compile)
@@ -414,6 +443,9 @@ def main():
     parser.add_argument("--export_preprocessed", type=str, default=None,
                         help="Export stride-sampled, resized/cropped images to this folder")
 
+    parser.add_argument("--max_height", type=int, default=None,
+                        help="Maximum height for images. If specified, images taller than this will be center-cropped.")
+
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
         "Provide --image_folder or --video_path"
@@ -427,6 +459,7 @@ def main():
         fps=args.fps, first_k=args.first_k, stride=args.stride,
         image_size=args.image_size, patch_size=args.patch_size,
         rotate_clockwise_90=args.rotate_clockwise_90,
+        max_height=args.max_height,
     )
 
     # Export preprocessed images if requested
@@ -459,7 +492,9 @@ def main():
         print(f"Casting aggregator to {dtype} (heads kept in fp32)")
         model.aggregator = model.aggregator.to(dtype=dtype)
 
-    images = images.to(device)
+    if args.mode == "streaming":
+        images = images.to(device)
+
     num_frames = images.shape[0]
     print(f"Input: {num_frames} frames, shape {tuple(images.shape)}")
     print(f"Mode: {args.mode}")
@@ -470,6 +505,39 @@ def main():
             f"alloc={torch.cuda.memory_allocated()/1e9:.2f} GB, "
             f"reserved={torch.cuda.memory_reserved()/1e9:.2f} GB"
         )
+
+    # ── Debug: GPU Memory Breakdown ──────────────────────────────────────────
+    if torch.cuda.is_available():
+        def get_tensor_size_mb(t):
+            if isinstance(t, torch.Tensor):
+                return t.element_size() * t.nelement() / (1024 ** 2)
+            return 0
+
+        # 1. Calculate Model Size
+        model_params_mb = sum(get_tensor_size_mb(p) for p in model.parameters())
+        model_buffers_mb = sum(get_tensor_size_mb(b) for b in model.buffers())
+        
+        # 2. Calculate Input Images Size
+        images_mb = get_tensor_size_mb(images)
+        
+        # 3. Get Total Allocated
+        total_allocated_mb = torch.cuda.memory_allocated() / (1024 ** 2)
+        
+        # 4. Estimate "Other" (Activations, CUDA Context, Fragmentation, etc.)
+        other_mb = total_allocated_mb - model_params_mb - model_buffers_mb - images_mb
+
+        print("\n--- GPU Memory Breakdown (Before Inference) ---")
+        print(f"  Model Parameters : {model_params_mb:.2f} MB")
+        print(f"  Model Buffers    : {model_buffers_mb:.2f} MB")
+        if images.device.type == 'cuda':
+            print(f"  Input Images     : {images_mb:.2f} MB ({num_frames} frames, on GPU)")
+        else:
+            print(f"  Input Images     : 0 MB on GPU, but {images_mb:.2f} MB ({num_frames} frames on CPU - will load per-window)")        
+        #print(f"  Other/Overhead   : {other_mb:.2f} MB (Context, Temp buffers, etc.)")
+        print(f"  -------------------------------------------")
+        print(f"  Total Allocated  : {total_allocated_mb:.2f} MB ({total_allocated_mb/1024:.2f} GB)")
+        print(f"  Total Reserved   : {torch.cuda.memory_reserved() / (1024**2):.2f} MB")
+        print("------------------------------------------------\n")
 
     if args.keyframe_interval is None:
         if args.mode == "streaming" and num_frames > 320:
