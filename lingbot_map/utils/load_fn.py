@@ -207,9 +207,18 @@ def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=No
     # Parallel load with progress bar
     num_workers = min(16, len(image_path_list))
     results = [None] * len(image_path_list)
+    
+    # Only show progress bar for batch loading (more than 1 image)
+    show_progress = len(image_path_list) > 1
+    
     with ThreadPoolExecutor(max_workers=num_workers) as pool:
         futures = pool.map(_load_one, enumerate(image_path_list))
-        for i, img, calib in tqdm(futures, total=len(image_path_list), desc="Loading images"):
+        if show_progress:
+            iterator = tqdm(futures, total=len(image_path_list), desc="Loading images")
+        else:
+            iterator = futures
+        
+        for i, img, calib in iterator:
             results[i] = img
             if fx is not None:
                 fx[i], fy[i], cx[i], cy[i] = calib

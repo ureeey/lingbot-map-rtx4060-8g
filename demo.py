@@ -48,19 +48,112 @@ from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
 from lingbot_map.utils.geometry import closed_form_inverse_se3_general
 from lingbot_map.utils.load_fn import load_and_preprocess_images
 
+try:
+    import rerun as rr
+except ImportError:
+    rr = None
 
+# =============================================================================
+# Lazy Image Loader
+# =============================================================================
+
+class ImageLazyLoader:
+    """Lazy loader for images - loads and preprocesses on demand.
+    
+    Designed for windowed inference where only a subset of images
+    are needed at any given time, reducing memory usage for long sequences.
+    """
+    def __init__(self, paths, image_size=518, patch_size=14, max_height=None, mode="crop"):
+        self.paths = paths
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.max_height = max_height
+        self.mode = mode
+        self._cache = {}  # Cache for recently used frames
+        self._cache_size = 16  # Cache last N frames
+        self._access_order = []  # Track access order for LRU eviction
+        
+    def __len__(self):
+        return len(self.paths)
+    
+    def __getitem__(self, idx):
+        """Load and preprocess a single image or slice of images."""
+        if isinstance(idx, slice):
+            indices = list(range(*idx.indices(len(self.paths))))
+            result = torch.stack([self._load_single(i) for i in indices])
+            # Explicitly free intermediate tensors
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            return result
+        elif isinstance(idx, (list, tuple)):
+            result = torch.stack([self._load_single(i) for i in idx])
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            return result
+        else:
+            return self._load_single(idx)
+    
+    def _load_single(self, idx):
+        """Load and preprocess a single image with proper cache management."""
+        # Check cache first
+        if idx in self._cache:
+            # Update access order for LRU
+            if idx in self._access_order:
+                self._access_order.remove(idx)
+            self._access_order.append(idx)
+            return self._cache[idx]
+        
+        path = self.paths[idx]
+        img_tensor = load_and_preprocess_images(
+            [path],
+            mode=self.mode,
+            image_size=self.image_size,
+            patch_size=self.patch_size,
+            param_max_height=self.max_height,
+        )
+        
+        # Proper LRU cache eviction
+        if len(self._cache) >= self._cache_size:
+            # Remove least recently used entry
+            if self._access_order:
+                oldest_key = self._access_order.pop(0)
+                if oldest_key in self._cache:
+                    # Explicitly delete tensor to free memory
+                    del self._cache[oldest_key]
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+        
+        # Add to cache
+        squeezed = img_tensor.squeeze(0)  # Remove batch dimension
+        self._cache[idx] = squeezed
+        self._access_order.append(idx)
+        
+        # Free the original tensor
+        del img_tensor
+        
+        return squeezed
+    
+    def clear_cache(self):
+        """Explicitly clear the cache to free memory."""
+        self._cache.clear()
+        self._access_order.clear()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    def get_batch(self, start, end):
+        """Get a batch of images from start to end index."""
+        return self[start:end]
+    
 # =============================================================================
 # Image loading
 # =============================================================================
 
 def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png,.JPG",
                 first_k=None, stride=1, image_size=518, patch_size=14, num_workers=8,
-                rotate_clockwise_90=False, max_height=None):
+                rotate_clockwise_90=False, max_height=None, use_lazy_loader=False):
     """Load images from folder or video and preprocess into a tensor.
 
     Returns:
-        (images, paths, resolved_image_folder): preprocessed tensor, file paths,
-        and the folder containing the source images (for sky mask caching etc.).
+        (images, paths, resolved_image_folder): preprocessed tensor or lazy loader, 
+        file paths, and the folder containing the source images (for sky mask caching etc.).
     """
     if video_path is not None:
         video_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -112,17 +205,29 @@ def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png
         resolved_folder = rotated_dir
         print(f"Rotated {len(paths)} images 90° clockwise → {rotated_dir}")
 
-    print(f"Loading {len(paths)} images...")
-    images = load_and_preprocess_images(
-        paths,
-        mode="crop",
-        image_size=image_size,
-        patch_size=patch_size,
-        param_max_height=max_height,
-    )
-    h, w = images.shape[-2:]
-    print(f"Preprocessed images to {w}x{h} using canonical crop mode")
-    return images, paths, resolved_folder
+    if use_lazy_loader:
+        print(f"Creating lazy loader for {len(paths)} images...")
+        lazy_loader = ImageLazyLoader(
+            paths,
+            image_size=image_size,
+            patch_size=patch_size,
+            max_height=max_height,
+        )
+        h, w = lazy_loader[0].shape[-2:]
+        print(f"Images will be preprocessed to {w}x{h} using canonical crop mode (lazy)")
+        return lazy_loader, paths, resolved_folder
+    else:
+        print(f"Loading {len(paths)} images...")
+        images = load_and_preprocess_images(
+            paths,
+            mode="crop",
+            image_size=image_size,
+            patch_size=patch_size,
+            param_max_height=max_height,
+        )
+        h, w = images.shape[-2:]
+        print(f"Preprocessed images to {w}x{h} using canonical crop mode")
+        return images, paths, resolved_folder
 
 
 # =============================================================================
@@ -446,6 +551,13 @@ def main():
     parser.add_argument("--max_height", type=int, default=None,
                         help="Maximum height for images. If specified, images taller than this will be center-cropped.")
 
+    parser.add_argument("--lazyloader", action="store_true", default=False,
+                        help="Use lazy loading for images to reduce memory usage. "
+                             "Recommended for long sequences (>200 frames).")
+
+    parser.add_argument("--offline_rerun", type=str, default=None,
+                        help="Path to save .rrd file. If set, skips post-processing/visualization and saves results via Rerun SDK.")
+    
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
         "Provide --image_folder or --video_path"
@@ -454,12 +566,14 @@ def main():
 
     # ── Load images & model ──────────────────────────────────────────────────
     t0 = time.time()
+    use_lazy = args.lazyloader
     images, paths, resolved_image_folder = load_images(
         image_folder=args.image_folder, video_path=args.video_path,
         fps=args.fps, first_k=args.first_k, stride=args.stride,
         image_size=args.image_size, patch_size=args.patch_size,
         rotate_clockwise_90=args.rotate_clockwise_90,
         max_height=args.max_height,
+        use_lazy_loader=use_lazy,
     )
 
     # Export preprocessed images if requested
@@ -495,8 +609,10 @@ def main():
     if args.mode == "streaming":
         images = images.to(device)
 
-    num_frames = images.shape[0]
-    print(f"Input: {num_frames} frames, shape {tuple(images.shape)}")
+    num_frames = len(images) if hasattr(images, '__len__') else images.shape[0]
+    print(f"Input: {num_frames} frames")
+    if hasattr(images, 'shape'):
+        print(f"Shape: {tuple(images.shape)}")
     print(f"Mode: {args.mode}")
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -529,11 +645,12 @@ def main():
         print("\n--- GPU Memory Breakdown (Before Inference) ---")
         print(f"  Model Parameters : {model_params_mb:.2f} MB")
         print(f"  Model Buffers    : {model_buffers_mb:.2f} MB")
-        if images.device.type == 'cuda':
+        if isinstance(images, torch.Tensor) and images.device.type == 'cuda':
             print(f"  Input Images     : {images_mb:.2f} MB ({num_frames} frames, on GPU)")
+        elif isinstance(images, torch.Tensor):
+            print(f"  Input Images     : 0 MB on GPU, but {images_mb:.2f} MB ({num_frames} frames on CPU)")
         else:
-            print(f"  Input Images     : 0 MB on GPU, but {images_mb:.2f} MB ({num_frames} frames on CPU - will load per-window)")        
-        #print(f"  Other/Overhead   : {other_mb:.2f} MB (Context, Temp buffers, etc.)")
+            print(f"  Input Images     : Lazy loader ({num_frames} frames on disk - will load per-window)")         
         print(f"  -------------------------------------------")
         print(f"  Total Allocated  : {total_allocated_mb:.2f} MB ({total_allocated_mb/1024:.2f} GB)")
         print(f"  Total Reserved   : {torch.cuda.memory_reserved() / (1024**2):.2f} MB")
@@ -609,6 +726,10 @@ def main():
     t0 = time.time()
 
     output_device = torch.device("cpu") if args.offload_to_cpu else None
+    
+    # Track if we used lazy loader
+    used_lazy_loader = hasattr(images, 'get_batch')
+    images_wrapper = None
 
     with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
         if args.mode == "streaming":
@@ -619,15 +740,101 @@ def main():
                 output_device=output_device,
             )
         else:  # windowed
-            predictions = model.inference_windowed(
-                images,
-                window_size=args.window_size,
-                overlap_size=args.overlap_size,
-                overlap_keyframes=args.overlap_keyframes,
-                num_scale_frames=args.num_scale_frames,
-                keyframe_interval=args.keyframe_interval,
-                output_device=output_device
-            )
+            # For windowed mode with lazy loader, we need to wrap it appropriately
+            if used_lazy_loader:
+                # Lazy loader case - create a wrapper that mimics tensor behavior
+                class LazyImageWrapper:
+                    def __init__(self, loader, device, image_size, patch_size, max_height=None):
+                        self.loader = loader
+                        self.device = device
+                        self.image_size = image_size
+                        self.patch_size = patch_size
+                        self.max_height = max_height
+                        # Get actual dimensions from first image
+                        sample = loader[0]
+                        self._h, self._w = sample.shape[-2:]
+                        # Shape should be [B, S, C, H, W] for compatibility
+                        self.shape = (1, len(loader), 3, self._h, self._w)
+                    
+                    def __getitem__(self, idx):
+                        """Support slicing like tensor[idx] -> returns [B, S, C, H, W]"""
+                        # Handle tuple indexing like images[:, start:end]
+                        if isinstance(idx, tuple):
+                            # We expect (batch_slice, seq_slice) where batch_slice is usually ':'
+                            if len(idx) == 2:
+                                batch_idx, seq_idx = idx
+                                # batch_idx should be slice(None) which means all batches (we have B=1)
+                                if isinstance(seq_idx, slice):
+                                    start = seq_idx.start if seq_idx.start is not None else 0
+                                    stop = seq_idx.stop if seq_idx.stop is not None else len(self.loader)
+                                    step = seq_idx.step if seq_idx.step is not None else 1
+                                    indices = list(range(start, stop, step))
+                                    batch = torch.stack([self.loader[i] for i in indices])
+                                    # batch shape: [S, C, H, W], add batch dim -> [B, S, C, H, W]
+                                    return batch.unsqueeze(0).to(self.device)
+                                elif isinstance(seq_idx, int):
+                                    single = self.loader[seq_idx]
+                                    return single.unsqueeze(0).unsqueeze(0).to(self.device)
+                                else:
+                                    raise IndexError(f"Unsupported sequence index type: {type(seq_idx)}")
+                            else:
+                                raise IndexError(f"Expected 2D tuple index, got {len(idx)}D")
+                        elif isinstance(idx, slice):
+                            # Direct slice on sequence dimension
+                            start = idx.start if idx.start is not None else 0
+                            stop = idx.stop if idx.stop is not None else len(self.loader)
+                            step = idx.step if idx.step is not None else 1
+                            indices = list(range(start, stop, step))
+                            batch = torch.stack([self.loader[i] for i in indices])
+                            return batch.unsqueeze(0).to(self.device)
+                        elif isinstance(idx, int):
+                            single = self.loader[idx]
+                            return single.unsqueeze(0).unsqueeze(0).to(self.device)
+                        else:
+                            raise IndexError(f"Unsupported index type: {type(idx)}")
+                    
+                    def unsqueeze(self, dim):
+                        """Return self for compatibility - shape already includes batch dim"""
+                        return self
+                    
+                    def to(self, device):
+                        """Return self for compatibility - we handle device in __getitem__"""
+                        return self
+                    
+                    @property
+                    def ndim(self):
+                        return 5
+                
+                images_wrapper = LazyImageWrapper(
+                    images, 
+                    device, 
+                    images.image_size, 
+                    images.patch_size,
+                    images.max_height
+                )
+                predictions = model.inference_windowed(
+                    images_wrapper,
+                    window_size=args.window_size,
+                    overlap_size=args.overlap_size,
+                    overlap_keyframes=args.overlap_keyframes,
+                    num_scale_frames=args.num_scale_frames,
+                    keyframe_interval=args.keyframe_interval,
+                    output_device=output_device
+                )
+                
+                # Remove the LazyImageWrapper from predictions since it's not a real tensor
+                if "images" in predictions:
+                    del predictions["images"]
+            else:
+                predictions = model.inference_windowed(
+                    images,
+                    window_size=args.window_size,
+                    overlap_size=args.overlap_size,
+                    overlap_keyframes=args.overlap_keyframes,
+                    num_scale_frames=args.num_scale_frames,
+                    keyframe_interval=args.keyframe_interval,
+                    output_device=output_device
+                )
 
     print(f"Inference done in {time.time() - t0:.1f}s")
     if torch.cuda.is_available():
@@ -637,16 +844,253 @@ def main():
             f"(reserved peak {torch.cuda.max_memory_reserved()/1e9:.2f} GB)"
         )
 
+    # ── Aggressive memory cleanup before post-processing ─────────────────────
+    print("Cleaning up inference memory...")
+    
+    # Delete model to free GPU memory
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    
+    if 0:
+        # For lazy loader, delete the wrapper and loader to free cache
+        if used_lazy_loader:
+            del images_wrapper
+            del images
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        # For non-lazy mode, delete images tensor
+        elif isinstance(images, torch.Tensor):
+            del images
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    
+    print(f"GPU memory after cleanup: {torch.cuda.memory_allocated()/1e9:.2f} GB" if torch.cuda.is_available() else "CPU-only mode")
+            
     # ── Post-process ─────────────────────────────────────────────────────────
-    if args.offload_to_cpu:
-        del images
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        images_for_post = predictions["images"]  # already CPU
+    # Reconstruct images only if needed for visualization
+    if used_lazy_loader:
+        print("Loading images from disk for visualization (lazy mode)...")
+        # Load images one by one to avoid peak memory spike
+        lazy_loader = ImageLazyLoader(
+            paths,
+            image_size=args.image_size,
+            patch_size=args.patch_size,
+            max_height=args.max_height,
+        )
+        images_for_post = torch.stack([lazy_loader[i] for i in range(len(lazy_loader))])
+        del lazy_loader  # Free the loader
     else:
-        images_for_post = images
+        # For non-lazy mode, we need to reload or use predictions
+        images_for_post = predictions.get("images")
+        if images_for_post is None:
+            print("Warning: No images in predictions, visualization may be limited")
+            images_for_post = torch.zeros((len(paths), 3, args.image_size, 
+                                          int(args.image_size * 294 / 518)))
 
     predictions, images_cpu = postprocess(predictions, images_for_post)
+
+    # ── Offline Rerun Save ───────────────────────────────────────────────────
+    if args.offline_rerun:
+        if rr is None:
+            raise ImportError("rerun-sdk is required for --offline_rerun. Install with: pip install rerun-sdk")
+        
+        print(f"Saving results to Rerun file: {args.offline_rerun}")
+        rr.init("lingbot_map_offline", spawn=False)
+        rr.save(args.offline_rerun)
+
+        h, w = int(images_cpu.shape[-2]), int(images_cpu.shape[-1])
+        extrinsic = predictions["extrinsic"]
+        intrinsic = predictions["intrinsic"]
+        
+        num_frames_pred = extrinsic.shape[0]
+        
+        print(f"[DEBUG] num_frames_pred: {num_frames_pred}")
+        print(f"[DEBUG] extrinsic shape: {extrinsic.shape}")
+        print(f"[DEBUG] intrinsic shape: {intrinsic.shape}")
+        print(f"[DEBUG] predictions keys: {list(predictions.keys())}")
+        
+        if "depth" in predictions:
+            print(f"[DEBUG] depth shape: {predictions['depth'].shape}")
+
+        from lingbot_map.utils.geometry import unproject_depth_map_to_point_map
+        
+        depth_for_unproject = predictions.get("depth")
+    
+        if depth_for_unproject is not None:
+            print(f"[DEBUG] Computing world points from depth...")
+            print(f"[DEBUG] depth_for_unproject shape before processing: {depth_for_unproject.shape}")
+            
+            # 点云反投影使用 c2w (camera-to-world)
+            extrinsic_c2w = extrinsic.cpu().numpy()  # (S, 3, 4) c2w
+            
+            world_points = unproject_depth_map_to_point_map(
+                depth_for_unproject.cpu().numpy(),
+                extrinsic_c2w,  # 传入 c2w
+                intrinsic.cpu().numpy()
+            )
+            print(f"[DEBUG] world_points shape: {world_points.shape}")
+        else:
+            world_points = None
+            print("[WARNING] No depth available for point cloud computation")
+        
+        for i in tqdm(range(num_frames_pred), desc="Logging to Rerun"):
+            # 最新版正确写法：用 rr.set_time + sequence 关键字参数
+            rr.set_time("frame_idx", sequence=i)  # 帧序号用 sequence
+            # 等价于旧版 set_time_sequence("frame_idx", i)，但接口统一
+            
+            # 相机使用 w2c (world-to-camera) 变换
+            cam_transform_c2w = extrinsic[i].cpu().numpy()
+
+            # 构建完整的 4x4 矩阵
+            transform_4x4_c2w = np.eye(4)
+            transform_4x4_c2w[:3, :] = cam_transform_c2w
+            
+            # 求逆得到 w2c
+            transform_4x4_w2c = np.linalg.inv(transform_4x4_c2w)
+
+            # 提取平移和旋转
+            translation = transform_4x4_w2c[:3, 3]
+            rotation_matrix = transform_4x4_w2c[:3, :3]
+
+            # 转换为四元数 (xyzw 格式)
+            from scipy.spatial.transform import Rotation as R
+            rot = R.from_matrix(rotation_matrix)
+            quat_xyzw = rot.as_quat()
+
+            # 记录相机变换（使用 w2c）
+            rr.log(f"world/camera/{i}", rr.Transform3D(
+                translation=translation,
+                rotation=rr.Quaternion(xyzw=quat_xyzw)
+            ))
+            
+            intr = intrinsic[i].cpu().numpy()
+            rr.log(f"world/camera/{i}", rr.Pinhole(
+                image_from_camera=intr,
+                width=w,
+                height=h
+            ))
+
+            if 0:
+            #if "depth" in predictions:
+                depth = predictions["depth"][i].cpu().numpy()
+                if depth.ndim == 3 and depth.shape[-1] == 1:
+                    depth = depth.squeeze(-1)
+                rr.log(f"world/camera/{i}/depth", rr.DepthImage(depth))
+
+            if world_points is not None:
+                points = world_points[i]
+                
+                # Get the corresponding color image for this frame
+                colors_for_points = None
+                if images_cpu is not None:
+                    img = images_cpu[i].numpy()
+                    if img.ndim == 3:
+                        # img shape: (C, H, W), convert to (H, W, C)
+                        img_hwc = np.transpose(img, (1, 2, 0))
+                        
+                        # Check if image dimensions match point cloud dimensions
+                        if img_hwc.shape[:2] == points.shape[:2]:
+                            # Dimensions match, can use directly
+                            colors_for_points = img_hwc
+                        else:
+                            # Dimensions don't match, need to resize image to match depth map
+                            import cv2
+                            img_resized = cv2.resize(
+                                img_hwc, 
+                                (points.shape[1], points.shape[0]),
+                                interpolation=cv2.INTER_LINEAR
+                            )
+                            colors_for_points = img_resized
+                
+                conf = predictions.get("depth_conf", None)
+                if conf is not None:
+                    conf_i = conf[i].cpu().numpy()
+                    mask = conf_i > args.conf_threshold
+                    
+                    # Filter points by confidence
+                    points_filtered = points[mask]
+                    
+                    # Extract colors using the same mask
+                    if colors_for_points is not None:
+                        colors_filtered = colors_for_points[mask]
+                        # Convert to uint8 RGB
+                        colors_uint8 = (np.clip(colors_filtered, 0, 1) * 255).astype(np.uint8)
+                    else:
+                        colors_uint8 = None
+                else:
+                    valid_mask = np.isfinite(points).all(axis=-1) & (points[..., 2] > 0)
+                    points_filtered = points[valid_mask]
+                    
+                    if colors_for_points is not None:
+                        colors_filtered = colors_for_points[valid_mask]
+                        colors_uint8 = (np.clip(colors_filtered, 0, 1) * 255).astype(np.uint8)
+                    else:
+                        colors_uint8 = None
+                
+                if points_filtered.size > 0:
+                    rr.log(f"world/points/{i}", rr.Points3D(
+                        positions=points_filtered,
+                        colors=colors_uint8 if colors_uint8 is not None else None,
+                        radii=0.01
+                    ))
+
+        rr.disconnect()
+        print(f"Saved to {args.offline_rerun}")
+        return
+
+    # Free the reconstructed images tensor
+    del images_for_post
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    print(f"Memory ready for visualization. GPU: {torch.cuda.memory_allocated()/1e9:.2f} GB" if torch.cuda.is_available() else "CPU-only mode")
+
+    # ── Memory analysis for predictions and images ───────────────────────────
+    def get_tensor_memory_mb(tensor):
+        """Calculate memory usage of a tensor in MB."""
+        if isinstance(tensor, torch.Tensor):
+            return tensor.element_size() * tensor.nelement() / (1024 ** 2)
+        elif isinstance(tensor, np.ndarray):
+            return tensor.nbytes / (1024 ** 2)
+        return 0
+    
+    print("\n=== Memory Analysis for Visualization ===")
+    total_predictions_mb = 0
+    for key, value in predictions.items():
+        mem_mb = get_tensor_memory_mb(value)
+        total_predictions_mb += mem_mb
+        if hasattr(value, 'shape'):
+            print(f"  {key:25s}: {mem_mb:8.2f} MB | shape: {value.shape}")
+        else:
+            print(f"  {key:25s}: {mem_mb:8.2f} MB | type: {type(value).__name__}")
+    
+    images_mem_mb = get_tensor_memory_mb(images_cpu)
+    print(f"  {'images':25s}: {images_mem_mb:8.2f} MB | shape: {images_cpu.shape if hasattr(images_cpu, 'shape') else 'N/A'}")
+    total_predictions_mb += images_mem_mb
+    
+    print(f"\n  {'Total predictions + images':25s}: {total_predictions_mb:8.2f} MB ({total_predictions_mb/1024:.2f} GB)")
+    
+    # Estimate visualization memory (viser will create additional structures)
+    # viser typically needs 2-3x the raw data size for rendering buffers
+    estimated_vis_multiplier = 2.5
+    estimated_total_mb = total_predictions_mb * estimated_vis_multiplier
+    print(f"\n  Estimated visualization memory (with {estimated_vis_multiplier}x overhead):")
+    print(f"    {estimated_total_mb:8.2f} MB ({estimated_total_mb/1024:.2f} GB)")
+    
+    # Check available system memory
+    try:
+        import psutil
+        avail_mem_gb = psutil.virtual_memory().available / (1024 ** 3)
+        print(f"\n  Available system memory: {avail_mem_gb:.2f} GB")
+        if estimated_total_mb / 1024 > avail_mem_gb * 0.8:
+            print(f"  ⚠️  WARNING: Estimated memory usage exceeds 80% of available memory!")
+            print(f"     Consider reducing --downsample_factor or --conf_threshold")
+    except ImportError:
+        print("\n  (Install psutil for system memory monitoring: pip install psutil)")
+    
+    print("=" * 50 + "\n")
 
     # ── Visualize ────────────────────────────────────────────────────────────
     try:
