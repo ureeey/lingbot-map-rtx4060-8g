@@ -11,3 +11,7 @@ CLAUDE.md
 .claude/
 .agents/
 skyseg.onnx
+example/
+*.mp4
+todelete/
+output/
