@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/teaser.png" width="100%">
+  <img src="assets/teaser.webp" width="100%">
 
 <h1>LingBot-Map: Geometric Context Transformer for Streaming 3D Reconstruction</h1>
 
@@ -60,6 +60,7 @@ LingBot-Map has focused on:
 
 ## 📰 News
 
+- **2026-05-25** — 📊 **Evaluation benchmark released**. We released the evaluation scripts for KITTI and Oxford Spires — see [benchmark/](benchmark/) for the pipeline, and run [`preprocess/oxford.py`](preprocess/oxford.py) to prepare Oxford Spires data before evaluation.
 - **2026-04-29** — 📹 **Long-video demo released**. We released a very-long-video example (~25 000 frames, 13-minute indoor walkthrough) rendered with the offline pipeline — see [Worked Example](#worked-example--long-indoor-walkthrough-25-000-frames-13-minutes) for the command, flag rationale, and rendered output.
 - **2026-04-27** — 🚀 **LingBot-Map accelerated**. Pull the latest `main` and run `python demo.py --compile ...` or `python gct_profile.py --backend flashinfer --dtype bf16 --compile` to verify on your hardware.
 - **2026-04-24** — Fixed a FlashInfer KV cache bug where `--keyframe_interval > 1` silently cached non-keyframes. **You should now see better pose and reconstruction quality when running with more than 320 frames**.
@@ -68,7 +69,16 @@ LingBot-Map has focused on:
 
 ## 📋 TODO
 
-- ⬜ Release evaluation benchmark
+- ✅ Release evaluation benchmark
+  - ✅ Oxford Spires dataset
+  - ✅ KITTI dataset
+  - ✅ VBR dataset
+  - ✅ Droid-W dataset
+  - ✅ TUM-D dataset
+  - ✅ 7-scenes dataset
+  - ✅ ETH3D dataset
+  - ✅ Tanks and Temples dataset
+  - ✅ NRGBD dataset
 - ✅ Release demo scripts
   - ✅ Indoor long-video demo ([Featured indoor walkthrough](#-featured-indoor-walkthrough-25-000-frames-13-minutes))
   - ⬜ Outdoor long-video demo
@@ -315,6 +325,8 @@ python demo.py --model_path /path/to/checkpoint.pt \
 ## 🎥 Offline Rendering Pipeline (`demo_render/batch_demo.py`)
 
 Use this pipeline when your sequence is too long for the interactive viser viewer — for example, the [indoor walkthrough featured above](#-featured-indoor-walkthrough-25-000-frames-13-minutes). `demo_render/batch_demo.py` is the all-in-one offline entry point: feed it a video or a folder of images and it will run model inference and produce a headless point-cloud flythrough MP4 in a single command. It shares the same PyTorch / FlashInfer / checkpoint stack as `demo.py`.
+
+For those constrained by limited VRAM or GPU usage, you may also refer to the implementation at: https://github.com/ureeey/lingbot-map-rtx4060-8g/commit/eeee84a89cc97c1e39b736b46df4ee315275700b
 
 ### Install (extends the main install)
 
