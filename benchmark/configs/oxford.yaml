@@ -1,5 +1,5 @@
 # Oxford Spires — lingbot_map trajectory evaluation.
-workspace: /path/to/workspace/oxford
+workspace: /home/jcy/workspace/bench_output/oxford_spires
 
 datasets:
   - oxford

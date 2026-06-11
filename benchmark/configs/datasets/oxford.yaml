@@ -1,5 +1,5 @@
 dataset: oxford_spires
-raw_data_root: /path/to/oxford_spires
+raw_data_root: /media/jcy/6f8bd02b-5080-9f4b-ad42-598fc747eda6/datasets_for_lingbot_map/oxford_spires_dataset
 sampling:
   strategy: sequence
   stride: 12

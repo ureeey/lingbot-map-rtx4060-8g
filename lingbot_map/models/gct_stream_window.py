@@ -1259,6 +1259,9 @@ class GCTStream(GCTBase):
                     w_lists['frame_type'].append(1 if is_keyframe else 2)
                     del frame_out
 
+                print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+                print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
                 all_window_predictions.append(_make_window_pred(w_lists))
 
         # Store for merge helpers

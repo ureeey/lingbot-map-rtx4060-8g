@@ -112,6 +112,33 @@ class LingbotMapMethod(BaseMethod):
         else:
             from lingbot_map.models.gct_stream import GCTStream
 
+        # For windowed mode, pass window_size to optimize KV cache allocation
+        window_size = None
+        if self.mode == 'windowed':
+            # Calculate actual window size based on parameters
+            ws = self.num_scale_frames
+            window_size_param = self.window_size
+            
+            # Resolve keyframe_interval: handle "auto" string before comparison
+            keyframe_interval = self.keyframe_interval
+            if keyframe_interval is None or keyframe_interval == 0 or \
+               (isinstance(keyframe_interval, str) and keyframe_interval.lower() == "auto"):
+                # For windowed mode, default to 1 (every frame is a keyframe within window)
+                keyframe_interval = 1
+            else:
+                keyframe_interval = int(keyframe_interval)
+            
+            phase2_kf = max(window_size_param - ws, 0)
+            phase2_frames = phase2_kf * max(keyframe_interval, 1)
+            window_size = ws + phase2_frames
+            print(f"[Window Size Calculation]")
+            print(f"  window_size_param (--window_size): {window_size_param}")
+            print(f"  num_scale_frames: {ws}")
+            print(f"  keyframe_interval: {keyframe_interval}")
+            print(f"  phase2_kf: {phase2_kf}")
+            print(f"  phase2_frames: {phase2_frames}")
+            print(f"  window_size (actual frames): {window_size}")
+
         print(f"  → Building LingbotMap model (mode: {self.mode})")
         self.model = GCTStream(
             img_size=self.image_size,
@@ -123,11 +150,15 @@ class LingbotMapMethod(BaseMethod):
             kv_cache_cross_frame_special=True,
             kv_cache_include_scale_frames=True,
             use_sdpa=self.use_sdpa,
+            window_size=window_size,
         )
 
         if self.checkpoint:
             print(f"  → Loading checkpoint: {self.checkpoint}")
-            ckpt = torch.load(self.checkpoint, map_location=self.device, weights_only=False)
+            #ckpt = torch.load(self.checkpoint, map_location=self.device, weights_only=False)
+            # 1. 先在CPU加载权重，避免GPU显存峰值，注意mmap选项，小心CPU内存都不够
+            ckpt = torch.load(self.checkpoint, map_location="cpu", weights_only=False, mmap=True)
+            print("  After torch.load(...).")
             state_dict = ckpt.get("model", ckpt)
             missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
             if missing:
@@ -136,7 +167,12 @@ class LingbotMapMethod(BaseMethod):
                 print(f"    Unexpected keys: {len(unexpected)}")
             print("    Checkpoint loaded.")
 
+        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        print(f"Move model to device: {self.device}")
         self.model = self.model.to(self.device).eval()
+        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
     def _prepare_images(self, rgb_list):
         """Convert list of HxWx3 uint8 numpy arrays to [S, 3, H, W] tensor in [0, 1]."""
@@ -144,7 +180,19 @@ class LingbotMapMethod(BaseMethod):
 
         to_tensor = TF.ToTensor()
         images = torch.stack([to_tensor(rgb) for rgb in rgb_list])
-        return images.to(self.device)
+        print(f"[Before moving to device] Images shape: {images.shape}, num_frames: {images.shape[0]}")
+
+        # Center crop from 378x518 to 294x518 (keep central region, crop height only)
+        _, _, H, W = images.shape
+        target_H, target_W = 294, 518
+        if H != target_H or W != target_W:
+            start_h = (H - target_H) // 2
+            start_w = (W - target_W) // 2
+            images = images[:, :, start_h:start_h + target_H, start_w:start_w + target_W]
+            print(f"[After center crop] Images shape: {images.shape}")
+
+        #return images.to(self.device)
+        return images
 
     def _run_inference(self, images):
         """Run LingbotMap inference and return raw predictions dict."""
@@ -152,6 +200,14 @@ class LingbotMapMethod(BaseMethod):
             dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
         else:
             dtype = torch.float32
+
+        if dtype != torch.float32 and getattr(self.model, "aggregator", None) is not None:
+            print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+            print(f"Casting aggregator to {dtype} (heads kept in fp32)")
+            self.model.aggregator = self.model.aggregator.to(dtype=dtype)# AFFECT memory_allocated !!!
+            print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
         print(f"  → Running {self.mode} inference (dtype: {dtype})")
 
@@ -174,12 +230,21 @@ class LingbotMapMethod(BaseMethod):
                     output_device=torch.device("cpu"),
                 )
             else:
+                keyframe_interval = _resolve_keyframe_interval(
+                    self.keyframe_interval, num_frames, self.auto_keyframe_threshold
+                )
+                if keyframe_interval != self.keyframe_interval:
+                    print(
+                        f"  → Auto-selected keyframe_interval={keyframe_interval} "
+                        f"(num_frames={num_frames}, raw={self.keyframe_interval!r}, "
+                        f"threshold={self.auto_keyframe_threshold})"
+                    )
                 predictions = self.model.inference_windowed(
                     images,
                     window_size=self.window_size,
                     overlap_size=self.overlap_size,
                     num_scale_frames=self.num_scale_frames,
-                    keyframe_interval=self.keyframe_interval,
+                    keyframe_interval=keyframe_interval,
                     flow_threshold=self.flow_threshold,
                     max_non_keyframe_gap=self.max_non_keyframe_gap,
                     output_device=torch.device("cpu"),

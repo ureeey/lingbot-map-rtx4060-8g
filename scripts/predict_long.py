@@ -359,8 +359,12 @@ def main():
         dtype = torch.float32
 
     if dtype != torch.float32 and getattr(model, "aggregator", None) is not None:
+        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
         print(f"Casting aggregator to {dtype} (heads kept in fp32)")
-        model.aggregator = model.aggregator.to(dtype=dtype)
+        model.aggregator = model.aggregator.to(dtype=dtype)# AFFECT memory_allocated !!!
+        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
     num_frames = len(images) if hasattr(images, '__len__') else images.shape[0]
     print(f"Input: {num_frames} frames")

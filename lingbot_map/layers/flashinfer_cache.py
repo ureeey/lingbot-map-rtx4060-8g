@@ -144,6 +144,9 @@ class FlashInferKVCacheManager:
         self.max_patch_pages = max_patch_pages
         self.max_num_pages = max_patch_pages + max_special_pages
 
+        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
         import sys
         print(f"\n[FlashInferKVCacheManager] 页面池配置:", file=sys.stderr)
         print(f"  scale_frames (尺度帧数): {scale_frames}", file=sys.stderr)
@@ -232,6 +235,10 @@ class FlashInferKVCacheManager:
         self._qo_indptr = torch.tensor(
             [0, tokens_per_frame], dtype=torch.int32, device=device
         )
+
+        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
 
     # =========================================================================
     # Public API  (drop-in compatible with previous FlashInferKVCacheManager)
