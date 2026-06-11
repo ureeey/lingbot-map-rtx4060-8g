@@ -13,7 +13,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python predict_long.py --model_
     *请先安装open3d*
 
 ```bash
-python create_ply.py --pred_path PATH --conf_threshold 5 --voxel_size 0.006 --max_frames 5000 --batch_size 100
+python create_ply.py --pred_path PATH --conf_threshold 5 --voxel_size 0.06 --max_frames 5000 --batch_size 100
 ```
 
 3. 预览ply文件
