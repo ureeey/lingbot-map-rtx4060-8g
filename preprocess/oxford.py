@@ -536,9 +536,18 @@ def process_scene(
     if not gt_tum.exists():
         return f"no gt-tum.txt at {gt_tum}"
 
+    # Support both zip and extracted directory formats
     images_zip = seq_dir / "raw" / "images.zip"
-    if not images_zip.exists():
-        return f"no images.zip at {images_zip}"
+    cam0_dir = seq_dir / "raw" / "cam0"
+    
+    if images_zip.exists():
+        image_source = "zip"
+        print(f"  Using compressed images from: {images_zip}")
+    elif cam0_dir.is_dir():
+        image_source = "dir"
+        print(f"  Using extracted images from: {cam0_dir}")
+    else:
+        return f"no images found (neither images.zip nor cam0/ directory)"
 
     tls_path = None
     if not images_only:
@@ -602,24 +611,108 @@ def process_scene(
     skip_pose    = 0
     skip_other   = 0
 
-    with zipfile.ZipFile(images_zip, "r") as zf:
-        cam0_names = sorted(
-            n for n in zf.namelist()
-            if n.startswith("cam0/") and n.lower().endswith(".jpg")
+    if image_source == "zip":
+        with zipfile.ZipFile(images_zip, "r") as zf:
+            cam0_names = sorted(
+                n for n in zf.namelist()
+                if n.startswith("cam0/") and n.lower().endswith(".jpg")
+            )
+            print(f"  cam0 images in zip: {len(cam0_names)}")
+
+            if max_frames > 0:
+                cam0_names = cam0_names[:max_frames]
+                print(f"  max_frames={max_frames}: using first {len(cam0_names)} frames")
+
+            if debug:
+                cam0_names = cam0_names[::debug_stride][:debug_frames]
+                print(f"  [debug] selected {len(cam0_names)} frames "
+                      f"(stride={debug_stride}, max={debug_frames})")
+
+            for name in tqdm(cam0_names, desc=seq_name, unit="frame"):
+                stem  = Path(name).stem
+                t_img = float(stem)
+
+                t_idx, _ = find_nearest(t_img, traj_ts, max_time_gap)
+                if t_idx is None:
+                    skip_pose += 1
+                    continue
+
+                # Decode & rectify
+                raw_bytes = zf.read(name)
+                arr       = np.frombuffer(raw_bytes, dtype=np.uint8)
+                img       = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is None:
+                    skip_other += 1
+                    continue
+                rect = rectifier.rectify(img)
+
+                # C2W pose
+                T_WB = tum_line_to_T_WB(traj_lines[t_idx])
+                C2W  = T_WB @ T_base_cam0
+
+                if not images_only:
+                    # Frustum cull → raw depth map
+                    depth_map, winner_map = frustum_cull_and_project(
+                        pts_world, C2W, fx, fy, cx, cy, W, H,
+                        near_plane=0.1, far_plane=MAX_DEPTH,
+                        pts_gpu=pts_gpu,
+                    )
+
+                    # Visibility filter → remove occluded points
+                    vis_radius = 20
+                    filtered_depth = apply_visibility_filter(
+                        depth_map, fx, fy, cx, cy, threshold=2.5, radius=vis_radius
+                    )
+                    # Mask image border — the filter neighbourhood is incomplete within
+                    # `vis_radius` pixels of each edge, so occluded points there are never
+                    # detected and leave a spurious depth strip.
+                    filtered_depth[:vis_radius, :]  = 0
+                    filtered_depth[-vis_radius:, :] = 0
+                    filtered_depth[:, :vis_radius]  = 0
+                    filtered_depth[:, -vis_radius:] = 0
+
+                    # Accumulate visible TLS point indices into global mask
+                    valid_px = filtered_depth > 0
+                    vis_idx  = winner_map[valid_px]
+                    vis_idx  = vis_idx[vis_idx >= 0]
+                    visible_mask[vis_idx] = True
+
+                # Save per-frame outputs
+                cv2.imwrite(str(out_img / f"{frame_idx:06d}.png"), rect)
+                if not images_only:
+                    np.save(str(out_dep / f"{frame_idx:06d}.npy"), filtered_depth)
+                    cv2.imwrite(str(out_dep_vis / f"{frame_idx:06d}.jpg"),
+                                depth_to_colormap(filtered_depth, max_depth=MAX_DEPTH),
+                                [cv2.IMWRITE_JPEG_QUALITY, 92])
+
+                    if debug:
+                        overlay = make_depth_overlay(rect, filtered_depth,
+                                                     max_depth=MAX_DEPTH)
+                        cv2.imwrite(str(out_dbg / f"{frame_idx:06d}.jpg"), overlay,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+                pose_records.append((frame_idx, stem, C2W))
+                frame_idx += 1
+    
+    else:  # image_source == "dir"
+        # Load from extracted directory
+        cam0_files = sorted(
+            f for f in cam0_dir.glob("*.jpg")
+            if f.is_file()
         )
-        print(f"  cam0 images in zip: {len(cam0_names)}")
+        print(f"  cam0 images in directory: {len(cam0_files)}")
 
         if max_frames > 0:
-            cam0_names = cam0_names[:max_frames]
-            print(f"  max_frames={max_frames}: using first {len(cam0_names)} frames")
+            cam0_files = cam0_files[:max_frames]
+            print(f"  max_frames={max_frames}: using first {len(cam0_files)} frames")
 
         if debug:
-            cam0_names = cam0_names[::debug_stride][:debug_frames]
-            print(f"  [debug] selected {len(cam0_names)} frames "
+            cam0_files = cam0_files[::debug_stride][:debug_frames]
+            print(f"  [debug] selected {len(cam0_files)} frames "
                   f"(stride={debug_stride}, max={debug_frames})")
 
-        for name in tqdm(cam0_names, desc=seq_name, unit="frame"):
-            stem  = Path(name).stem
+        for img_path in tqdm(cam0_files, desc=seq_name, unit="frame"):
+            stem  = img_path.stem
             t_img = float(stem)
 
             t_idx, _ = find_nearest(t_img, traj_ts, max_time_gap)
@@ -627,10 +720,8 @@ def process_scene(
                 skip_pose += 1
                 continue
 
-            # Decode & rectify
-            raw_bytes = zf.read(name)
-            arr       = np.frombuffer(raw_bytes, dtype=np.uint8)
-            img       = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            # Read & rectify
+            img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
             if img is None:
                 skip_other += 1
                 continue

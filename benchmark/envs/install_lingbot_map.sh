@@ -14,7 +14,7 @@
 #   bash envs/install_lingbot_map.sh --force   # recreate env from scratch
 set -euo pipefail
 
-ENV_NAME="lingbot_map"
+ENV_NAME="lingbot-map"
 BENCH_DEPS="numpy opencv-python Pillow matplotlib open3d plyfile tqdm scipy evo pyyaml OpenEXR Imath"
 
 MODE=""
