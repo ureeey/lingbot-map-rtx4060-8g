@@ -1,4 +1,4 @@
-本文档主要说明将 lingbot-map 在 **16GB 内存加 8GB 显存** 上测试 **长序列** 的细节。
+本文档主要说明将 lingbot-map 在 **16GB 内存加 8GB 显存** 上测试 **长序列** 的细节，以及跑通 benchmark。
 
 由于内存紧张，添加了 lazyloader 和 offline_rerun 选项，但是这让 demo.py 变得繁杂。所以把 demo.py 拆成了 predict_long.py 和 create_ply.py 两个文件，后续还会补充 create_rrd.py，以完善回放功能。
 
@@ -31,3 +31,17 @@ meshlab FILE.ply
 4. indoor_travel 测试结果 (原始视频 500s 50fps 共 25000 帧 ，按 10fps 预处理后 5000 帧)
 
 ![Logo](assets/snapshot01.png)
+
+5. benchmark oxford_spires keble-college-02
+
+    *不要省略 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ！*
+
+```bash
+python prepare.py --config configs/oxford.yaml
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python run.py --config configs/oxford.yaml -f
+python evaluate.py --config configs/oxford.yaml
+python report.py --workspace ../../bench_output/oxford_spires/
+```
+
+![Logo](assets/trajectory_visualization.png)
+![Logo](assets/auc_vs_frames.png)
