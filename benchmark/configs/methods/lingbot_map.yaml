@@ -16,3 +16,4 @@ _keyframe_interval: auto    # auto = 1 if frames<=320 else ceil(N/320); or a fix
 _auto_keyframe_threshold: 320    # frame-count threshold driving the 'auto' keyframe_interval (streaming mode)
 _area_budget: 255000
 _align: 14
+_overlap_size: 16 # default: 16
