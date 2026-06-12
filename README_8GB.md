@@ -13,7 +13,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python predict_long.py --model_
     *请先安装open3d*
 
 ```bash
-python create_ply.py --pred_path PATH --conf_threshold 5 --voxel_size 0.06 --max_frames 5000 --batch_size 100
+python create_ply.py --pred_path PATH --conf_threshold 5 --voxel_size 0.006 --max_frames 5000 --batch_size 100
 ```
 
 3. 预览ply文件
@@ -45,3 +45,9 @@ python report.py --workspace ../../bench_output/oxford_spires/
 
 ![Logo](assets/trajectory_visualization.png)
 ![Logo](assets/auc_vs_frames.png)
+
+6. streaming 模式跑 320 帧序列
+
+```bash
+python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --image_folder example/oxford --output_dir ./output/ --kv_cache_sliding_window 48
+```

@@ -140,18 +140,31 @@ class LingbotMapMethod(BaseMethod):
             print(f"  window_size (actual frames): {window_size}")
 
         print(f"  → Building LingbotMap model (mode: {self.mode})")
-        self.model = GCTStream(
-            img_size=self.image_size,
-            patch_size=self.patch_size,
-            enable_3d_rope=self.enable_3d_rope,
-            max_frame_num=self.max_frame_num,
-            kv_cache_sliding_window=self.kv_cache_sliding_window,
-            kv_cache_scale_frames=self.kv_cache_scale_frames,
-            kv_cache_cross_frame_special=True,
-            kv_cache_include_scale_frames=True,
-            use_sdpa=self.use_sdpa,
-            window_size=window_size,
-        )
+        if self.mode == 'windowed':
+            self.model = GCTStream(
+                img_size=self.image_size,
+                patch_size=self.patch_size,
+                enable_3d_rope=self.enable_3d_rope,
+                max_frame_num=self.max_frame_num,
+                kv_cache_sliding_window=self.kv_cache_sliding_window,
+                kv_cache_scale_frames=self.kv_cache_scale_frames,
+                kv_cache_cross_frame_special=True,
+                kv_cache_include_scale_frames=True,
+                use_sdpa=self.use_sdpa,
+                window_size=window_size,
+            )
+        else:
+            self.model = GCTStream(
+                img_size=self.image_size,
+                patch_size=self.patch_size,
+                enable_3d_rope=self.enable_3d_rope,
+                max_frame_num=self.max_frame_num,
+                kv_cache_sliding_window=self.kv_cache_sliding_window,
+                kv_cache_scale_frames=self.kv_cache_scale_frames,
+                kv_cache_cross_frame_special=True,
+                kv_cache_include_scale_frames=True,
+                use_sdpa=self.use_sdpa,
+            )
 
         if self.checkpoint:
             print(f"  → Loading checkpoint: {self.checkpoint}")

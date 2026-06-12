@@ -15,6 +15,67 @@ from tqdm.auto import tqdm
 
 from lingbot_map.utils.load_fn import load_and_preprocess_images
 
+class LazyImageWrapper:
+    def __init__(self, loader, device, image_size, patch_size, max_height=None):
+        self.loader = loader
+        self.device = device
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.max_height = max_height
+        # Get actual dimensions from first image
+        sample = loader[0]
+        self._h, self._w = sample.shape[-2:]
+        # Shape should be [B, S, C, H, W] for compatibility
+        self.shape = (1, len(loader), 3, self._h, self._w)
+    
+    def __getitem__(self, idx):
+        """Support slicing like tensor[idx] -> returns [B, S, C, H, W]"""
+        # Handle tuple indexing like images[:, start:end]
+        if isinstance(idx, tuple):
+            # We expect (batch_slice, seq_slice) where batch_slice is usually ':'
+            if len(idx) == 2:
+                batch_idx, seq_idx = idx
+                # batch_idx should be slice(None) which means all batches (we have B=1)
+                if isinstance(seq_idx, slice):
+                    start = seq_idx.start if seq_idx.start is not None else 0
+                    stop = seq_idx.stop if seq_idx.stop is not None else len(self.loader)
+                    step = seq_idx.step if seq_idx.step is not None else 1
+                    indices = list(range(start, stop, step))
+                    batch = torch.stack([self.loader[i] for i in indices])
+                    # batch shape: [S, C, H, W], add batch dim -> [B, S, C, H, W]
+                    return batch.unsqueeze(0).to(self.device)
+                elif isinstance(seq_idx, int):
+                    single = self.loader[seq_idx]
+                    return single.unsqueeze(0).unsqueeze(0).to(self.device)
+                else:
+                    raise IndexError(f"Unsupported sequence index type: {type(seq_idx)}")
+            else:
+                raise IndexError(f"Expected 2D tuple index, got {len(idx)}D")
+        elif isinstance(idx, slice):
+            # Direct slice on sequence dimension
+            start = idx.start if idx.start is not None else 0
+            stop = idx.stop if idx.stop is not None else len(self.loader)
+            step = idx.step if idx.step is not None else 1
+            indices = list(range(start, stop, step))
+            batch = torch.stack([self.loader[i] for i in indices])
+            return batch.unsqueeze(0).to(self.device)
+        elif isinstance(idx, int):
+            single = self.loader[idx]
+            return single.unsqueeze(0).unsqueeze(0).to(self.device)
+        else:
+            raise IndexError(f"Unsupported index type: {type(idx)}")
+    
+    def unsqueeze(self, dim):
+        """Return self for compatibility - shape already includes batch dim"""
+        return self
+    
+    def to(self, device):
+        """Return self for compatibility - we handle device in __getitem__"""
+        return self
+    
+    @property
+    def ndim(self):
+        return 5
 
 # =============================================================================
 # Lazy Image Loader
