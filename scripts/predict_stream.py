@@ -48,6 +48,35 @@ from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
 from lingbot_map.utils.geometry import closed_form_inverse_se3_general
 from lingbot_map.utils.loadimage import load_images,LazyImageWrapper
 
+import torch.ao.quantization as quant
+from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
+from torchinfo import summary
+from torchao.utils import get_model_size_in_bytes
+def quantize_linear_to_int8(module):
+    """纯PyTorch INT8逐通道权重量化，零依赖"""
+    for name, child in list(module.named_children()):
+        if isinstance(child, torch.nn.Linear):
+            with torch.no_grad():
+                w = child.weight.data
+                # 逐通道计算 scale
+                scale = w.abs().max(dim=1).values / 127.0
+                # 量化到 INT8
+                w_int8 = torch.clamp(torch.round(w / scale.unsqueeze(1)), -127, 127).to(torch.int8)
+                child.weight.requires_grad_(False)
+                # 替换权重
+                child.weight.data = w_int8
+                # 保存 scale
+                child.register_buffer('quant_scale', scale.to(w.device))
+                
+                # 替换 forward：推理时反量化
+                orig_forward = child.forward
+                def forward_hook(x, child=child, orig_forward=orig_forward):
+                    w_fp16 = child.weight.data.float() * child.quant_scale.unsqueeze(1).to(x.dtype)
+                    return torch.nn.functional.linear(x, w_fp16, child.bias)
+                child.forward = forward_hook
+        else:
+            quantize_linear_to_int8(child)
+
 # =============================================================================
 # Model loading
 # =============================================================================
@@ -129,7 +158,13 @@ def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype,
     cold orchestration code and can confuse cudagraph_trees' allocator
     checkpoint state.
     """
-    num_avail = int(images.shape[0])
+    # Support both tensor and ImageLazyLoader
+    if hasattr(images, 'shape'):
+        num_avail = int(images.shape[0])
+    else:
+        # For ImageLazyLoader or similar objects
+        num_avail = len(images)
+    
     scale_frames = max(1, min(int(scale_frames), num_avail))
     # Keep at least one streaming frame for the per-frame compile path; if the
     # user supplied <= scale_frames images, shrink scale to free a stream slot.
@@ -138,10 +173,19 @@ def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype,
     warm_stream_n = max(1, min(int(warm_stream_n), num_avail - scale_frames))
     kf_int = max(int(keyframe_interval), 1)
 
+    # Get device from model
+    device = next(model.parameters()).device
+
     # images: [S, 3, H, W] on device already; slice + add batch dim, no copy of
     # spatial dims so warmup shape == real inference shape (H, W).
-    warm_scale = images[:scale_frames].unsqueeze(0).to(dtype)
-    warm_stream = images[scale_frames:scale_frames + warm_stream_n].unsqueeze(0).to(dtype)
+    # For ImageLazyLoader, we need to load and move to device
+    if hasattr(images, 'shape'):
+        warm_scale = images[:scale_frames].unsqueeze(0).to(device=device, dtype=dtype)
+        warm_stream = images[scale_frames:scale_frames + warm_stream_n].unsqueeze(0).to(device=device, dtype=dtype)
+    else:
+        # For ImageLazyLoader, load slices and move to device
+        warm_scale = images[:scale_frames].unsqueeze(0).to(device=device, dtype=dtype)
+        warm_stream = images[scale_frames:scale_frames + warm_stream_n].unsqueeze(0).to(device=device, dtype=dtype)
 
     for _ in range(passes):
         model.clean_kv_cache()
@@ -284,7 +328,7 @@ def main():
     # Streaming options
     parser.add_argument("--enable_3d_rope", action="store_true", default=True)
     parser.add_argument("--max_frame_num", type=int, default=1024)
-    parser.add_argument("--num_scale_frames", type=int, default=2)
+    parser.add_argument("--num_scale_frames", type=int, default=8)
     parser.add_argument(
         "--keyframe_interval",
         type=int,
@@ -320,7 +364,12 @@ def main():
                              "Recommended for long sequences (>200 frames).")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Directory to save prediction results (.pt file)")
-    
+    parser.add_argument("--quant", action="store_true", default=False,
+                        help="Use torchao.quantization to reduce memory usage. " \
+                        "aggregator  bfloat16 -> INT4_WEIGHT_ONLY, "
+                        "camera_head bfloat16 -> INT8_WEIGHT_ONLY, "
+                        "depth_head  bfloat16 -> INT8_WEIGHT_ONLY. ")
+        
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
         "Provide --image_folder or --video_path"
@@ -344,6 +393,24 @@ def main():
 
     model = load_model(args, device, num_frames)
     print(f"Total load time: {time.time() - t0:.1f}s")
+        
+    # 1 - 自定义权重压缩，没有加速计算
+    # quantize_linear_to_int8(model.aggregator)
+    # 2 - PyTorch动态量化，仅支持CPU
+    # model.to('cpu')
+    # model.aggregator = quant.quantize_dynamic(
+    #     model.aggregator, {torch.nn.Linear}, dtype=torch.qint8
+    # )
+    # model.to(device) # 后续无法执行
+    # 3 - torchao 的权重量化 IN8
+    # quantize_(model, Int8WeightOnlyConfig())
+    # 4 - torchao 的权重量化 IN4，依赖模型已经转 bf16
+    # config = Int4WeightOnlyConfig(
+    #     group_size=32,
+    #     int4_packing_format="tile_packed_to_4d",
+    #     int4_choose_qparams_algorithm="hqq"  # ✅ 选择 HQQ 算法，绕过 mslk
+    # )
+    # quantize_(model, config)
 
     # Pick inference dtype; autocast still runs for the ops that need fp32 (e.g. LayerNorm).
     if torch.cuda.is_available():
@@ -359,8 +426,40 @@ def main():
     if dtype != torch.float32 and getattr(model, "aggregator", None) is not None:
         print(f"Casting aggregator to {dtype} (heads kept in fp32)")
         model.aggregator = model.aggregator.to(dtype=dtype)
-        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        # 6 转换整个模型为 bf16 行不通，因为 camera_head.py line 282 need scalar type Float but found BFloat16
+        # print(f"Casting the whole model to {dtype}")
+        # model = model.to(dtype=dtype)        
+
+#    model.camera_head = model.camera_head.to(dtype=torch.float16) # expected scalar type Float but found Half
+#    model.depth_head = model.depth_head.to(dtype=torch.float16) # expected scalar type Float but found Half
+
+    if args.quant:
+        ori_size = get_model_size_in_bytes(model) / (1024**3)
+        print(f"量化前模型实际内存占用: {ori_size:.2f} GB")
+
+        # 5 - torchao 的权重量化 IN4，必须放在在 model.aggregator 转 bf16 之后
+        config = Int4WeightOnlyConfig(
+            group_size=32,
+            int4_packing_format="tile_packed_to_4d",
+            int4_choose_qparams_algorithm="hqq"  # ✅ 选择 HQQ 算法，绕过 mslk
+        )
+
+        quantize_(model.aggregator, config)
+        quantize_(model.camera_head, Int8WeightOnlyConfig())
+        quantize_(model.depth_head, Int8WeightOnlyConfig())
+        
+        quantized_size = get_model_size_in_bytes(model) / (1024**3)
+        print(f"量化后模型实际内存占用: {quantized_size:.2f} GB")
+
+        print(f"量化 之后 已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB ，已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
+    if 0:
+        dummy_input = torch.randn(1, 3, 518, 294, dtype=torch.bfloat16).cuda()
+        summary(
+            model,
+            input_data=dummy_input,
+            depth=1
+        )
 
     if args.keyframe_interval is None:
         args.keyframe_interval = (num_frames + 319) // 320
@@ -380,7 +479,26 @@ def main():
         if scale_for_warm >= num_frames:
             scale_for_warm = max(1, num_frames - 1)
         warm_stream_n = min(10, max(1, num_frames - scale_for_warm))
-        warm_h, warm_w = int(images.shape[-2]), int(images.shape[-1])
+        # Get image dimensions - handle both tensor and lazy loader
+        if hasattr(images, 'shape'):
+            warm_h, warm_w = int(images.shape[-2]), int(images.shape[-1])
+        elif hasattr(images, 'image_size') and hasattr(images, 'patch_size'):
+            # For ImageLazyLoader, calculate actual dimensions from image_size and patch_size
+            warm_h = images.image_size
+            # Width is calculated based on aspect ratio preservation during preprocessing
+            # The load_images function maintains aspect ratio, so we need to get actual dims
+            # Load first image temporarily to get actual shape
+            sample_img = images[0] if hasattr(images, '__getitem__') else None
+            if sample_img is not None:
+                warm_h, warm_w = int(sample_img.shape[-2]), int(sample_img.shape[-1])
+                del sample_img
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            else:
+                warm_w = warm_h  # Fallback to square if can't determine
+        else:
+            raise ValueError("Cannot determine image dimensions from input")
+            
         print(
             f"Warmup eager (scale={scale_for_warm} + {warm_stream_n} streaming, "
             f"shape={warm_h}x{warm_w}, kf_int={args.keyframe_interval})..."

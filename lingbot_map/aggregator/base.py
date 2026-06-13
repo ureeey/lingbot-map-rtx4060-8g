@@ -119,7 +119,7 @@ class AggregatorBase(nn.Module, ABC):
         self.use_gradient_checkpoint = use_gradient_checkpoint
         self.pretrained_path = pretrained_path
 
-        print("pretrained_path:", self.pretrained_path)
+        # print("pretrained_path:", self.pretrained_path)
 
         # Validate depth
         if self.depth % self.aa_block_size != 0:
@@ -227,7 +227,7 @@ class AggregatorBase(nn.Module, ABC):
                 # Store checkpoint for block initialization
                 self._dino_checkpoint = ckpt
             except Exception as e:
-                logger.warning(f"Failed to load pretrained weights: {e}")
+                # logger.warning(f"Failed to load pretrained weights: {e}")
                 self._dino_checkpoint = None
 
             # Disable gradients for mask token

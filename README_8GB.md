@@ -1,4 +1,4 @@
-本文档主要说明将 lingbot-map 在 **16GB 内存加 8GB 显存** 上测试 **长序列** 的细节，以及跑通 benchmark。
+本文档主要说明将 lingbot-map 在 **16GB 内存加 8GB 显存** 上测试 **长序列**、跑通 **benchmark** 以及探索 **优化** 的细节。
 
 由于内存紧张，添加了 lazyloader 和 offline_rerun 选项，但是这让 demo.py 变得繁杂。所以把 demo.py 拆成了 predict_long.py 和 create_ply.py 两个文件，后续还会补充 create_rrd.py，以完善回放功能。
 
@@ -48,6 +48,16 @@ python report.py --workspace ../../bench_output/oxford_spires/
 
 6. streaming 模式跑 320 帧序列
 
+    *默认 offload_to_cpu=True*
+
 ```bash
-python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --image_folder example/oxford --output_dir ./output/ --kv_cache_sliding_window 48
+python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --image_folder example/oxford --output_dir ./output/ --num_scale_frames 2 --kv_cache_sliding_window 48
+```
+
+7. 启用 **量化 --quant** 后可按默认 kv_cache_sliding_window=64 跑 320 帧序列
+
+    *量化后推理速度降低一半，最终结果没有明显退化，且节省更多显存用于 kv cache*
+
+```bash
+python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --image_folder example/oxford --output_dir ./output/ --num_scale_frames 2 --quant
 ```

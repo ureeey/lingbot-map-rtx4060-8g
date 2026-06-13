@@ -144,39 +144,39 @@ class FlashInferKVCacheManager:
         self.max_patch_pages = max_patch_pages
         self.max_num_pages = max_patch_pages + max_special_pages
 
-        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-
-        import sys
-        print(f"\n[FlashInferKVCacheManager] 页面池配置:", file=sys.stderr)
-        print(f"  scale_frames (尺度帧数): {scale_frames}", file=sys.stderr)
-        print(f"  sliding_window (滑动窗口): {sliding_window}", file=sys.stderr)
-        print(f"  effective_max_total_frames (有效最大总帧数): {effective_max_total_frames}", file=sys.stderr)
-        print(f"  num_special_tokens (每帧特殊token数): {num_special_tokens}", file=sys.stderr)
-        print(f"  page_size (页大小): {self.page_size}", file=sys.stderr)
-        print(f"  max_patch_pages (最大patch页数): {max_patch_pages} = {scale_frames} + {sliding_window} + 1", file=sys.stderr)
-        print(f"  max_special_pages (最大special页数): {max_special_pages} = ceil({effective_max_total_frames} * {num_special_tokens} / {self.page_size} + 1)", file=sys.stderr)
-        print(f"  max_num_pages (总页数): {self.max_num_pages} = {max_patch_pages} + {max_special_pages}", file=sys.stderr)
-        print(file=sys.stderr)
-        bytes_per_element = torch.finfo(dtype).bits // 8 if dtype != torch.float32 else 4
-        elements_per_block = self.max_num_pages * 2 * self.page_size * num_heads * head_dim
-        bytes_per_block = elements_per_block * bytes_per_element
-        total_bytes = bytes_per_block * num_blocks
-        total_mb = total_bytes / (1024 ** 2)
+        print(f"FlashInferKVCache 之前 已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB ，已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
         
-        print(f"\n[FlashInferKVCacheManager] 内存分配详情:", file=sys.stderr)
-        print(f"  num_blocks (层数): {num_blocks}", file=sys.stderr)
-        print(f"  max_num_pages (总页数): {self.max_num_pages} (patch页={self.max_patch_pages}, special页={self.max_num_pages - self.max_patch_pages})", file=sys.stderr)
-        print(f"  page_size (每页大小): {self.page_size} (patches_per_frame={self.patches_per_frame})", file=sys.stderr)
-        print(f"  num_heads (注意力头数): {num_heads}", file=sys.stderr)
-        print(f"  head_dim (头维度): {head_dim}", file=sys.stderr)
-        print(f"  dtype (数据类型): {dtype} ({bytes_per_element} 字节/元素)", file=sys.stderr)
-        print(f"  device (设备): {device}", file=sys.stderr)
-        print(f"  每个块的元素数: {elements_per_block:,}", file=sys.stderr)
-        print(f"  每个块占用内存: {bytes_per_block / (1024**2):.2f} MB", file=sys.stderr)
-        print(f"  所有块总内存: {total_mb:.2f} MB", file=sys.stderr)
-        print(f"  每个块的张量形状: [{self.max_num_pages}, 2, {self.page_size}, {num_heads}, {head_dim}]", file=sys.stderr)
-        print(file=sys.stderr)
+        if 0:
+            import sys
+            print(f"\n[FlashInferKVCacheManager] 页面池配置:", file=sys.stderr)
+            print(f"  scale_frames (尺度帧数): {scale_frames}", file=sys.stderr)
+            print(f"  sliding_window (滑动窗口): {sliding_window}", file=sys.stderr)
+            print(f"  effective_max_total_frames (有效最大总帧数): {effective_max_total_frames}", file=sys.stderr)
+            print(f"  num_special_tokens (每帧特殊token数): {num_special_tokens}", file=sys.stderr)
+            print(f"  page_size (页大小): {self.page_size}", file=sys.stderr)
+            print(f"  max_patch_pages (最大patch页数): {max_patch_pages} = {scale_frames} + {sliding_window} + 1", file=sys.stderr)
+            print(f"  max_special_pages (最大special页数): {max_special_pages} = ceil({effective_max_total_frames} * {num_special_tokens} / {self.page_size} + 1)", file=sys.stderr)
+            print(f"  max_num_pages (总页数): {self.max_num_pages} = {max_patch_pages} + {max_special_pages}", file=sys.stderr)
+            print(file=sys.stderr)
+            bytes_per_element = torch.finfo(dtype).bits // 8 if dtype != torch.float32 else 4
+            elements_per_block = self.max_num_pages * 2 * self.page_size * num_heads * head_dim
+            bytes_per_block = elements_per_block * bytes_per_element
+            total_bytes = bytes_per_block * num_blocks
+            total_mb = total_bytes / (1024 ** 2)
+            
+            print(f"\n[FlashInferKVCacheManager] 内存分配详情:", file=sys.stderr)
+            print(f"  num_blocks (层数): {num_blocks}", file=sys.stderr)
+            print(f"  max_num_pages (总页数): {self.max_num_pages} (patch页={self.max_patch_pages}, special页={self.max_num_pages - self.max_patch_pages})", file=sys.stderr)
+            print(f"  page_size (每页大小): {self.page_size} (patches_per_frame={self.patches_per_frame})", file=sys.stderr)
+            print(f"  num_heads (注意力头数): {num_heads}", file=sys.stderr)
+            print(f"  head_dim (头维度): {head_dim}", file=sys.stderr)
+            print(f"  dtype (数据类型): {dtype} ({bytes_per_element} 字节/元素)", file=sys.stderr)
+            print(f"  device (设备): {device}", file=sys.stderr)
+            print(f"  每个块的元素数: {elements_per_block:,}", file=sys.stderr)
+            print(f"  每个块占用内存: {bytes_per_block / (1024**2):.2f} MB", file=sys.stderr)
+            print(f"  所有块总内存: {total_mb:.2f} MB", file=sys.stderr)
+            print(f"  每个块的张量形状: [{self.max_num_pages}, 2, {self.page_size}, {num_heads}, {head_dim}]", file=sys.stderr)
+            print(file=sys.stderr)
 
         # ── Physical paged KV caches ─────────────────────────────────────────
         # Shape per block: [max_num_pages, 2, page_size, H, D]   (NHD, K=dim0, V=dim1)
@@ -236,8 +236,7 @@ class FlashInferKVCacheManager:
             [0, tokens_per_frame], dtype=torch.int32, device=device
         )
 
-        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        print(f"FlashInferKVCache 之后 已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB ，已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
 
     # =========================================================================
