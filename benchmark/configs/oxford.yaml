@@ -5,7 +5,7 @@ datasets:
   - oxford
 
 methods:
-  - lingbot_map_stream
+  - lingbot_map_window_quant
 
 evaluation:
   traj:

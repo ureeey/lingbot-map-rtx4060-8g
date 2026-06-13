@@ -68,6 +68,7 @@ class LingbotMapMethod(BaseMethod):
         align: int = 14,
         area_budget: Optional[int] = None,
         logger: Optional[logging.Logger] = None,
+        quant: Optional[bool] = False,
         **kwargs,
     ):
         super().__init__(
@@ -94,6 +95,7 @@ class LingbotMapMethod(BaseMethod):
         self.auto_keyframe_threshold = int(auto_keyframe_threshold)
         self.flow_threshold = flow_threshold
         self.max_non_keyframe_gap = max_non_keyframe_gap
+        self.quant = quant
 
         if self.mode not in ('streaming', 'windowed'):
             raise ValueError(f"Invalid mode '{self.mode}'. Must be 'streaming' or 'windowed'")
@@ -215,12 +217,31 @@ class LingbotMapMethod(BaseMethod):
             dtype = torch.float32
 
         if dtype != torch.float32 and getattr(self.model, "aggregator", None) is not None:
-            print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-            print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
             print(f"Casting aggregator to {dtype} (heads kept in fp32)")
             self.model.aggregator = self.model.aggregator.to(dtype=dtype)# AFFECT memory_allocated !!!
-            print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-            print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
+        if self.quant:
+            from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
+            from torchao.utils import get_model_size_in_bytes
+
+            ori_size = get_model_size_in_bytes(self.model) / (1024**3)
+            print(f"量化前模型实际内存占用: {ori_size:.2f} GB")
+
+            # 5 - torchao 的权重量化 IN4，必须放在在 model.aggregator 转 bf16 之后
+            config = Int4WeightOnlyConfig(
+                group_size=32,
+                int4_packing_format="tile_packed_to_4d",
+                int4_choose_qparams_algorithm="hqq"  # ✅ 选择 HQQ 算法，绕过 mslk
+            )
+
+            quantize_(self.model.aggregator, config)
+            quantize_(self.model.camera_head, Int8WeightOnlyConfig())
+            quantize_(self.model.depth_head, Int8WeightOnlyConfig())
+            
+            quantized_size = get_model_size_in_bytes(self.model) / (1024**3)
+            print(f"量化后模型实际内存占用: {quantized_size:.2f} GB")
+
+            print(f"量化 之后 已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB ，已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
         print(f"  → Running {self.mode} inference (dtype: {dtype})")
 
