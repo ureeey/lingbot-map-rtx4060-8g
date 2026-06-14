@@ -49,7 +49,7 @@ from lingbot_map.utils.geometry import closed_form_inverse_se3_general
 from lingbot_map.utils.loadimage import load_images,LazyImageWrapper
 
 import torch.ao.quantization as quant
-from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
+from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig, Float8DynamicActivationFloat8WeightConfig, Float8WeightOnlyConfig
 from torchinfo import summary
 from torchao.utils import get_model_size_in_bytes
 def quantize_linear_to_int8(module):
@@ -369,6 +369,8 @@ def main():
                         "aggregator  bfloat16 -> INT4_WEIGHT_ONLY, "
                         "camera_head bfloat16 -> INT8_WEIGHT_ONLY, "
                         "depth_head  bfloat16 -> INT8_WEIGHT_ONLY. ")
+    parser.add_argument("--quant_new", action="store_true", default=False,
+                    help="Use torchao.quantization to reduce memory usage. ")
         
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
@@ -437,7 +439,7 @@ def main():
         ori_size = get_model_size_in_bytes(model) / (1024**3)
         print(f"量化前模型实际内存占用: {ori_size:.2f} GB")
 
-        # 5 - torchao 的权重量化 IN4，必须放在在 model.aggregator 转 bf16 之后
+        # 5 - torchao 的权重量化 INT4，必须放在在 model.aggregator 转 bf16 之后
         config = Int4WeightOnlyConfig(
             group_size=32,
             int4_packing_format="tile_packed_to_4d",
@@ -451,7 +453,15 @@ def main():
         quantized_size = get_model_size_in_bytes(model) / (1024**3)
         print(f"量化后模型实际内存占用: {quantized_size:.2f} GB")
 
-        print(f"量化 之后 已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB ，已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+    if args.quant_new:
+        ori_size = get_model_size_in_bytes(model) / (1024**3)
+        print(f"量化前模型实际内存占用: {ori_size:.2f} GB")
+
+        quantize_(model, Float8DynamicActivationFloat8WeightConfig())
+        
+        quantized_size = get_model_size_in_bytes(model) / (1024**3)
+        print(f"量化后模型实际内存占用: {quantized_size:.2f} GB")
+
 
     if 0:
         dummy_input = torch.randn(1, 3, 518, 294, dtype=torch.bfloat16).cuda()

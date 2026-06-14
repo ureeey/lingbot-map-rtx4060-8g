@@ -61,3 +61,9 @@ python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --im
 ```bash
 python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --image_folder example/oxford --output_dir ./output/ --num_scale_frames 2 --quant
 ```
+
+8. 启用 **fp8量化 --quant_new** 相比 **--quant** 推理速度明显提升，权重显存略增
+
+```bash
+python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --image_folder example/oxford --output_dir ./output/ --num_scale_frames 2 --quant_new
+```
