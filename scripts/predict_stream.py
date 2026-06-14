@@ -97,6 +97,8 @@ def load_model(args, device, num_frames):
         kv_cache_include_scale_frames=True,
         use_sdpa=args.use_sdpa,
         camera_num_iterations=args.camera_num_iterations,
+        kv_cache_fp8=args.kv_cache_fp8,
+        gqa_ratio=args.gqa_ratio,
     )
 
     if args.model_path:
@@ -304,7 +306,8 @@ def postprocess(predictions, image_size_hw=None, images=None):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="LingBot-MAP: Streaming 3D Reconstruction Demo")
+    parser = argparse.ArgumentParser(description="LingBot-MAP: Streaming 3D Reconstruction Demo",
+                                     formatter_class=argparse.RawTextHelpFormatter)
 
     # Input
     parser.add_argument("--image_folder", type=str, default=None)
@@ -364,17 +367,26 @@ def main():
                              "Recommended for long sequences (>200 frames).")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Directory to save prediction results (.pt file)")
-    parser.add_argument("--quant", action="store_true", default=False,
-                        help="Use torchao.quantization to reduce memory usage. " \
-                        "aggregator  bfloat16 -> INT4_WEIGHT_ONLY, "
-                        "camera_head bfloat16 -> INT8_WEIGHT_ONLY, "
-                        "depth_head  bfloat16 -> INT8_WEIGHT_ONLY. ")
-    parser.add_argument("--quant_new", action="store_true", default=False,
-                    help="Use torchao.quantization to reduce memory usage. ")
-        
+    parser.add_argument("--quant_wa", type=str, default="none", choices=["none", "int", "fp8"],
+                        help="quantization for weights and activations.\n" \
+                             "none: no quantization\n"
+                             "int:\n"
+                             "  aggregator  -> INT4_WEIGHT_ONLY \n"
+                             "  camera_head -> INT8_WEIGHT_ONLY \n"
+                             "  depth_head  -> INT8_WEIGHT_ONLY \n"
+                             "fp8: \n"
+                             "  the whole model -> Float8DynamicActivationFloat8WeightConfig \n")
+    parser.add_argument("--kv_cache_fp8", action="store_true", default=False,
+                        help="Store KV cache in FP8 (FlashInfer only).")
+    parser.add_argument("--gqa_ratio", type=int, default=1,
+                        help="Deprecated !!! Fixed 1.\n" \
+                        "Group Query Attention ratio. Default: 1, no GQA; set >1 to reduce KV cache size at a potential quality cost.")
+
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
         "Provide --image_folder or --video_path"
+
+    args.gqa_ratio = 1
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -389,7 +401,6 @@ def main():
         use_lazy_loader=args.lazyloader,
     )
     num_frames = len(images) if hasattr(images, '__len__') else images.shape[0]
-    print(f"Input: {num_frames} frames")
     if hasattr(images, 'shape'):
         print(f"Shape: {tuple(images.shape)}")
 
@@ -435,10 +446,9 @@ def main():
 #    model.camera_head = model.camera_head.to(dtype=torch.float16) # expected scalar type Float but found Half
 #    model.depth_head = model.depth_head.to(dtype=torch.float16) # expected scalar type Float but found Half
 
-    if args.quant:
-        ori_size = get_model_size_in_bytes(model) / (1024**3)
-        print(f"量化前模型实际内存占用: {ori_size:.2f} GB")
+    print(f"量化前模型实际内存占用: {get_model_size_in_bytes(model) / (1024**3):.2f} GB") if args.quant_wa != "none" else None
 
+    if args.quant_wa == "int":
         # 5 - torchao 的权重量化 INT4，必须放在在 model.aggregator 转 bf16 之后
         config = Int4WeightOnlyConfig(
             group_size=32,
@@ -449,19 +459,10 @@ def main():
         quantize_(model.aggregator, config)
         quantize_(model.camera_head, Int8WeightOnlyConfig())
         quantize_(model.depth_head, Int8WeightOnlyConfig())
-        
-        quantized_size = get_model_size_in_bytes(model) / (1024**3)
-        print(f"量化后模型实际内存占用: {quantized_size:.2f} GB")
-
-    if args.quant_new:
-        ori_size = get_model_size_in_bytes(model) / (1024**3)
-        print(f"量化前模型实际内存占用: {ori_size:.2f} GB")
-
+    elif args.quant_wa == "fp8":
         quantize_(model, Float8DynamicActivationFloat8WeightConfig())
-        
-        quantized_size = get_model_size_in_bytes(model) / (1024**3)
-        print(f"量化后模型实际内存占用: {quantized_size:.2f} GB")
 
+    print(f"量化后模型实际内存占用: {get_model_size_in_bytes(model) / (1024**3):.2f} GB") if args.quant_wa != "none" else None
 
     if 0:
         dummy_input = torch.randn(1, 3, 518, 294, dtype=torch.bfloat16).cuda()

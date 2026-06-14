@@ -49,6 +49,8 @@ class AggregatorStream(AggregatorBase):
         kv_cache_camera_only: bool = False,
         # Window size for memory optimization (windowed mode)
         window_size: int = None,
+        kv_cache_fp8: bool = False,  # If True, store KV cache in FP8 (FlashInfer only)
+        gqa_ratio: int = 1,  # Group Query Attention ratio; set >1 to reduce KV cache size at potential quality cost
         # Base class parameters via **kwargs
         **kwargs
     ):
@@ -84,6 +86,8 @@ class AggregatorStream(AggregatorBase):
         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
         self.kv_cache_camera_only = kv_cache_camera_only
+        self.kv_cache_fp8 = kv_cache_fp8
+        self.gqa_ratio = gqa_ratio
 
         # Pop kwargs that are passed but not needed by base class
         kwargs.pop('enable_stream_inference', None)
@@ -208,29 +212,53 @@ class AggregatorStream(AggregatorBase):
                 If None, falls back to assuming square images of self.img_size.
         """
         if self.kv_cache_manager is None:
-            from lingbot_map.layers.flashinfer_cache import FlashInferKVCacheManager
+            if self.kv_cache_fp8 or self.gqa_ratio > 1:
+                from lingbot_map.layers.flashinfer_cache_new import FlashInferKVCacheManager
+            else:
+                from lingbot_map.layers.flashinfer_cache import FlashInferKVCacheManager
+                
             num_heads = self.embed_dim // 64  # head_dim = 64 for ViT-L
             head_dim = 64
             if tokens_per_frame is None:
                 tokens_per_frame = (self.img_size // self.patch_size) ** 2 + self.num_special_tokens
             # max_num_frames: scale + window + headroom
             max_num_frames = self.kv_cache_scale_frames + self.kv_cache_sliding_window + 16
-            self.kv_cache_manager = FlashInferKVCacheManager(
-                num_blocks=self.depth,
-                max_num_frames=max_num_frames,
-                tokens_per_frame=tokens_per_frame,
-                num_heads=num_heads,
-                head_dim=head_dim,
-                dtype=dtype,
-                device=device,
-                num_special_tokens=self.num_special_tokens,
-                scale_frames=self.kv_cache_scale_frames,
-                sliding_window=self.kv_cache_sliding_window,
-                max_total_frames=self.max_frame_num,
-                force_fp32=getattr(self, 'kv_cache_force_fp32', False),
-                fa3=getattr(self, 'kv_cache_fa3', False),
-                window_size=self.window_size,
-            )
+            if self.kv_cache_fp8 or self.gqa_ratio > 1:
+                self.kv_cache_manager = FlashInferKVCacheManager(
+                    num_blocks=self.depth,
+                    max_num_frames=max_num_frames,
+                    tokens_per_frame=tokens_per_frame,
+                    num_heads=num_heads,
+                    head_dim=head_dim,
+                    dtype=dtype,
+                    device=device,
+                    num_special_tokens=self.num_special_tokens,
+                    scale_frames=self.kv_cache_scale_frames,
+                    sliding_window=self.kv_cache_sliding_window,
+                    max_total_frames=self.max_frame_num,
+                    force_fp32=getattr(self, 'kv_cache_force_fp32', False),
+                    fa3=getattr(self, 'kv_cache_fa3', False),
+                    window_size=self.window_size,
+                    kv_cache_fp8=self.kv_cache_fp8,
+                    gqa_ratio=self.gqa_ratio,
+                )
+            else:
+                self.kv_cache_manager = FlashInferKVCacheManager(
+                    num_blocks=self.depth,
+                    max_num_frames=max_num_frames,
+                    tokens_per_frame=tokens_per_frame,
+                    num_heads=num_heads,
+                    head_dim=head_dim,
+                    dtype=dtype,
+                    device=device,
+                    num_special_tokens=self.num_special_tokens,
+                    scale_frames=self.kv_cache_scale_frames,
+                    sliding_window=self.kv_cache_sliding_window,
+                    max_total_frames=self.max_frame_num,
+                    force_fp32=getattr(self, 'kv_cache_force_fp32', False),
+                    fa3=getattr(self, 'kv_cache_fa3', False),
+                    window_size=self.window_size,
+                )
             logger.info(
                 f"FlashInfer KV cache manager initialized: {self.depth} blocks, "
                 f"max_frames={max_num_frames}, tokens_per_frame={tokens_per_frame}"

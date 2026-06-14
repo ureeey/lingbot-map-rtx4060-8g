@@ -438,12 +438,13 @@ class FlashInferAttention(Attention):
             kv_cache: FlashInferKVCacheManager instance or None (batch mode)
             global_idx: Block index for per-block cache access
         """
-        from lingbot_map.layers.flashinfer_cache import FlashInferKVCacheManager
+        from lingbot_map.layers.flashinfer_cache import FlashInferKVCacheManager as KV_MGR
+        from lingbot_map.layers.flashinfer_cache_new import FlashInferKVCacheManager as KV_MGR_NEW
 
         B, N, C = x.shape
 
         # ========== Batch Mode (no KV cache manager) ==========
-        if not isinstance(kv_cache, FlashInferKVCacheManager):
+        if not isinstance(kv_cache, KV_MGR) and not isinstance(kv_cache, KV_MGR_NEW):
             # [3, B, num_heads, N, head_dim]
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.unbind(0)  # Each: [B, num_heads, N, head_dim]

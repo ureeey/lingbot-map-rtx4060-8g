@@ -127,6 +127,8 @@ class GCTStream(GCTBase):
         use_gradient_checkpoint: bool = True,
         # Camera head iterative refinement (lower = faster inference; default 4)
         camera_num_iterations: int = 4,
+        kv_cache_fp8: bool = False,  # If True, store KV cache in FP8 (FlashInfer only)
+        gqa_ratio: int = 1,  # Group Query Attention ratio; set >1 to reduce KV cache size at potential quality cost
     ):
         """
         Initialize GCTStream.
@@ -154,6 +156,8 @@ class GCTStream(GCTBase):
             kv_cache_cross_frame_special: Keep special tokens from evicted frames
             kv_cache_include_scale_frames: Include scale frames in KV cache
             kv_cache_camera_only: Only keep camera tokens from evicted frames
+            kv_cache_fp8: If True, store KV cache in FP8 (FlashInfer only)
+            gqa_ratio: Group Query Attention ratio; set >1 to reduce KV cache size at potential quality cost
         """
         # Store stream-specific parameters before calling super().__init__()
         self.pretrained_path = pretrained_path
@@ -176,6 +180,8 @@ class GCTStream(GCTBase):
         self.kv_cache_camera_only = kv_cache_camera_only
         self.use_sdpa = use_sdpa
         self.camera_num_iterations = camera_num_iterations
+        self.kv_cache_fp8 = kv_cache_fp8
+        self.gqa_ratio = gqa_ratio
 
         # Call base class __init__ (will call _build_aggregator)
         super().__init__(
@@ -226,6 +232,8 @@ class GCTStream(GCTBase):
             kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
             kv_cache_camera_only=self.kv_cache_camera_only,
             use_gradient_checkpoint=self.use_gradient_checkpoint,
+            kv_cache_fp8=self.kv_cache_fp8,
+            gqa_ratio=self.gqa_ratio,
         )
 
     def _build_camera_head(self) -> nn.Module:

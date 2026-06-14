@@ -20,4 +20,6 @@ weights/
 .DS_Store
 **/.DS_Store
 docs/
+launch.json
+extensions.json
 
