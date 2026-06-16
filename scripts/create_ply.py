@@ -158,22 +158,14 @@ def main():
     resolved_image_folder = save_data.get('resolved_image_folder', None)
     image_shape = save_data.get('image_shape', None)
     loaded_args = save_data.get('args', {})
+    output_path = save_data.get('output_path', None)
     
 
     print(f"Loaded in {time.time() - t0:.1f}s")
     print(f"Prediction keys: {list(predictions.keys())}")
     
-    # Determine output rrd path based on resolved_image_folder
-    if resolved_image_folder is not None:
-        folder_name = os.path.basename(resolved_image_folder)
-        # Remove potential trailing slashes or spaces
-        folder_name = folder_name.strip().rstrip('/')
-        if not folder_name:
-            folder_name = "output"
-        offline_rerun = f"{folder_name}.rrd"
-    else:
-        offline_rerun = "output.rrd"
-    
+    fuse_path = output_path.replace(".pt", f"-C{args.conf_threshold}-V{args.voxel_size}-F{args.max_frames}.ply")
+    fuse_path = fuse_path.replace("pred", "fused")    
 
     # Initialize lazy image loader (Mandatory as per requirement)
     lazy_image_loader = None
@@ -408,9 +400,8 @@ def main():
     print("\nExtracting reconstructed model...")
     pcd_from_volume = volume.extract_point_cloud()
 
-    output_ply_path = offline_rerun.replace(".rrd", ".ply")
+    output_ply_path = fuse_path
     o3d.io.write_point_cloud(output_ply_path, pcd_from_volume)
-    print(f"Fused point cloud saved to: {output_ply_path}")
 
     print(f"Fused Point cloud Num: {len(pcd_from_volume.points):,} ")
     if hasattr(pcd_from_volume, 'colors') and len(pcd_from_volume.colors) > 0:
@@ -438,6 +429,8 @@ def main():
         if total_points_count > 0:
             print(f"\n  Fused/Total ratio: {len(pcd_from_volume.points)/total_points_count*100:.2f}%")
         print(f"{'='*60}\n")
+
+    print(f"    Fused point cloud saved to: {output_ply_path}")
 
     return
 

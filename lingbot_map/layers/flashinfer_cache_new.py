@@ -36,8 +36,9 @@ class FlashInferKVCacheManager:
         sliding_window:      Sliding window size (64).
         max_total_frames:    Upper bound on total frames ever processed; used to
                              pre-allocate the special page pool (default 2048).
-        kv_cache_fp8:       Whether to use FP8 for KV cache (default False, set True for FP8).
-        gqa_ratio:          GQA ratio (default 1).
+        kv_cache_fp8:        Whether to use FP8 for KV cache (default False, set True for FP8).
+        kv_cache_cut:        Whether to use downsampling in 2D (default 1).
+        gqa_ratio:           GQA ratio (default 1).
     """
 
     def __init__(
@@ -57,18 +58,35 @@ class FlashInferKVCacheManager:
         fa3: bool = False,
         window_size: int = None,
         kv_cache_fp8: bool = False,
+        kv_cache_cut: int = 1,
         gqa_ratio: int = 1,
     ):
         if not FLASHINFER_AVAILABLE:
             raise RuntimeError("FlashInfer is not available. Please install flashinfer.")
 
+        print(f"[ FlashInferKVCache 之前 已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB ，已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB ]")
+
         self.num_blocks = num_blocks
         self.num_special_tokens = num_special_tokens         # 6
-        self.patches_per_frame = tokens_per_frame - num_special_tokens  # 256 / 999 / ...
+        self.raw_patches_per_frame = tokens_per_frame - num_special_tokens  # 256 / 999 / ...
+        self.cache_patches_per_frame = self.raw_patches_per_frame
+
+        if kv_cache_cut > 1:
+            if self.raw_patches_per_frame == 777: # 37x21
+                self.H_cut = math.ceil(21 / kv_cache_cut)
+                self.W_cut = math.ceil(37 / kv_cache_cut)
+                assert self.H_cut > 0 and self.W_cut > 0, (
+                    f"H_cut={self.H_cut} or W_cut={self.W_cut} <= 0 for kv_cache_cut={kv_cache_cut}"
+                )
+                self.cache_patches_per_frame = self.H_cut * self.W_cut
+                print(f"--- H_cut = {self.H_cut}, W_cut = {self.W_cut} ---")
+        else:
+            print(f"--- KV cache does not use downsampling ---")
+
         # Use exact page_size = patches_per_frame to eliminate zero-padded slots.
         # FA2 (backend="fa2") supports non-power-of-2 page sizes.
         # FA3 (sm90) requires power-of-2 page sizes; use next_power_of_2 when fa3=True.
-        p = self.patches_per_frame
+        p = self.cache_patches_per_frame
         if fa3:
             # Round up to next power-of-2 for FA3 SM90 kernel requirement.
             # e.g. 999 → 1024 (25 zero-padded slots per patch page)
@@ -83,9 +101,10 @@ class FlashInferKVCacheManager:
         self.head_dim = head_dim
         self.tokens_per_frame = tokens_per_frame
         self.kv_cache_fp8 = kv_cache_fp8
+        self.kv_cache_cut = kv_cache_cut
         self.gqa_ratio = gqa_ratio
 
-        assert self.patches_per_frame > 0, (
+        assert self.cache_patches_per_frame > 0, (
             f"tokens_per_frame={tokens_per_frame} <= num_special_tokens={num_special_tokens}"
         )
         assert self.page_size > 0
@@ -116,12 +135,10 @@ class FlashInferKVCacheManager:
         )
         self.max_patch_pages = max_patch_pages
         self.max_num_pages = max_patch_pages + max_special_pages
-
-        print(f"FlashInferKVCache 之前 已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB ，已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
         
         if 1:
             import sys
-            print(f"\n[FlashInferKVCacheManager] 页面池配置:", file=sys.stderr)
+            print(f"--- 页面池配置 ---", file=sys.stderr)
             print(f"  scale_frames (尺度帧数): {scale_frames}", file=sys.stderr)
             print(f"  sliding_window (滑动窗口): {sliding_window}", file=sys.stderr)
             print(f"  effective_max_total_frames (有效最大总帧数): {effective_max_total_frames}", file=sys.stderr)
@@ -130,17 +147,16 @@ class FlashInferKVCacheManager:
             print(f"  max_patch_pages (最大patch页数): {max_patch_pages} = {scale_frames} + {sliding_window} + 1", file=sys.stderr)
             print(f"  max_special_pages (最大special页数): {max_special_pages} = ceil({effective_max_total_frames} * {num_special_tokens} / {self.page_size} + 1)", file=sys.stderr)
             print(f"  max_num_pages (总页数): {self.max_num_pages} = {max_patch_pages} + {max_special_pages}", file=sys.stderr)
-            print(file=sys.stderr)
             bytes_per_element = torch.finfo(self.kv_dtype).bits // 8 if self.kv_dtype != torch.float32 else 4
             elements_per_block = self.max_num_pages * 2 * self.page_size * self.num_kv_heads * head_dim
             bytes_per_block = elements_per_block * bytes_per_element
             total_bytes = bytes_per_block * num_blocks
             total_mb = total_bytes / (1024 ** 2)
             
-            print(f"\n[FlashInferKVCacheManager] 内存分配详情:", file=sys.stderr)
+            print(f"--- 内存分配详情 ---", file=sys.stderr)
             print(f"  num_blocks (层数): {num_blocks}", file=sys.stderr)
             print(f"  max_num_pages (总页数): {self.max_num_pages} (patch页={self.max_patch_pages}, special页={self.max_num_pages - self.max_patch_pages})", file=sys.stderr)
-            print(f"  page_size (每页大小): {self.page_size} (patches_per_frame={self.patches_per_frame})", file=sys.stderr)
+            print(f"  page_size (每页大小): {self.page_size} (patches_per_frame: CACHE={self.cache_patches_per_frame}, raw={self.raw_patches_per_frame})", file=sys.stderr)
             print(f"  num_kv_heads (KV头数): {self.num_kv_heads} (GQA {gqa_ratio}:1, query heads={num_heads})", file=sys.stderr)
             print(f"  head_dim (头维度): {head_dim}", file=sys.stderr)
             print(f"  kv dtype (数据类型): {self.kv_dtype} ({bytes_per_element} 字节/元素)", file=sys.stderr)
@@ -149,7 +165,6 @@ class FlashInferKVCacheManager:
             print(f"  每个块占用内存: {bytes_per_block / (1024**2):.2f} MB", file=sys.stderr)
             print(f"  所有块总内存: {total_mb:.2f} MB", file=sys.stderr)
             print(f"  每个块的张量形状: [{self.max_num_pages}, 2, {self.page_size}, {self.num_kv_heads}, {head_dim}]", file=sys.stderr)
-            print(file=sys.stderr)
 
         # ── Physical paged KV caches ─────────────────────────────────────────
         # Shape per block: [max_num_pages, 2, page_size, H_kv, D]
@@ -200,6 +215,7 @@ class FlashInferKVCacheManager:
         # FA2 supports non-power-of-2 page sizes and avoids a FA3 NaN bug seen in
         # FlashInfer 0.2.5 at 518×378 resolution.
         _fi_backend = "fa3" if fa3 else "fa2"
+        print(f"--- backend: {_fi_backend} ---")
         self.workspace_buffer = torch.zeros(
             128 * 1024 * 1024, dtype=torch.uint8, device=device
         )
@@ -214,7 +230,7 @@ class FlashInferKVCacheManager:
             [0, tokens_per_frame], dtype=torch.int32, device=device
         )
 
-        print(f"FlashInferKVCache 之后 已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB ，已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        print(f"[ FlashInferKVCache 之后 已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB ，已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB ]")
 
 
     # =========================================================================
@@ -230,8 +246,8 @@ class FlashInferKVCacheManager:
 
         Args:
             block_idx: Block/layer index (0 … num_blocks-1).
-            k: [tokens_per_frame, H_q, D]  NHD layout.
-            v: [tokens_per_frame, H_q, D]  NHD layout.
+            k: [raw_tokens_per_frame, H_q, D]  NHD layout.
+            v: [raw_tokens_per_frame, H_q, D]  NHD layout.
         """
         n = self.num_special_tokens  # 6
         sp_k    = k[:n].to(self.q_dtype)
@@ -239,8 +255,8 @@ class FlashInferKVCacheManager:
         sp_v    = v[:n].to(self.q_dtype)
         patch_v = v[n:].to(self.q_dtype)
 
-        assert patch_k.shape[0] == self.patches_per_frame, (
-            f"block {block_idx}: expected {self.patches_per_frame} patch tokens, "
+        assert patch_k.shape[0] == self.raw_patches_per_frame, (
+            f"block {block_idx}: expected {self.raw_patches_per_frame} patch tokens, "
             f"got {patch_k.shape[0]} (tokens_per_frame={k.shape[0]})"
         )
 
@@ -301,6 +317,56 @@ class FlashInferKVCacheManager:
                     self._requantize_all_pages(block_idx, new_k_scale, new_v_scale)
                 self.k_scales[block_idx] = new_k_scale
                 self.v_scales[block_idx] = new_v_scale
+
+        if self.kv_cache_cut > 1:
+            # downsampling agg_patch_k, agg_patch_v
+            if 1:
+                def downsample_2D(t: Tensor, step: int) -> Tensor:
+                    """
+                    将一维patch token序列转回二维按指定步长下采样
+                    t: [T=H*W, H_q, D] -> [T'=H'*W', H_q, D]
+                    step: 采样跨度，2=每隔1个取，3=每隔2个取...
+                    """
+                    T, H_q, D = t.shape
+                    # 从777=37x21恢复到2D空间布局
+                    H, W = 37, 21
+                    assert T == H * W, f"Expected {H}x{W}={H*W} tokens, got {T}"
+                    
+                    # [H*W, H_q, D] -> [H, W, H_q, D]
+                    t_2d = t.view(H, W, H_q, D)
+                    
+                    # 按步长下采样: ::step
+                    t_downsampled = t_2d[::step, ::step, :, :]
+                    
+                    # [H_new, W_new, H_q, D] -> [T_new, H_q, D]
+                    H_new, W_new = t_downsampled.shape[:2]
+                    return t_downsampled.contiguous().view(H_new * W_new, H_q, D)            
+                        # 对K和V分别执行下采样
+                agg_patch_k = downsample_2D(agg_patch_k, self.kv_cache_cut)
+                agg_patch_v = downsample_2D(agg_patch_v, self.kv_cache_cut)
+
+            if 0:
+                cut = self.kv_cache_cut
+                
+                # 只生成一次随机偏移，K和V共用
+                H, W = 37, 21
+                H_out = math.ceil(H / cut)
+                W_out = math.ceil(W / cut)
+                
+                # 生成一次随机坐标
+                offset_h = torch.randint(0, cut, (H_out, W_out), device=agg_patch_k.device)
+                offset_w = torch.randint(0, cut, (H_out, W_out), device=agg_patch_k.device)
+                base_h = torch.arange(0, H_out, device=agg_patch_k.device) * cut
+                base_w = torch.arange(0, W_out, device=agg_patch_k.device) * cut
+                idx_h = (base_h.unsqueeze(1) + offset_h).clamp(max=H-1)
+                idx_w = (base_w.unsqueeze(0) + offset_w).clamp(max=W-1)
+                
+                def sample_with_mask(t: Tensor) -> Tensor:
+                    t_2d = t.view(H, W, t.shape[1], t.shape[2])
+                    return t_2d[idx_h, idx_w, :, :].contiguous().view(H_out * W_out, t.shape[1], t.shape[2])
+                
+                agg_patch_k = sample_with_mask(agg_patch_k)
+                agg_patch_v = sample_with_mask(agg_patch_v)
 
         # Write patch and special tokens using current (maybe updated) scales.
         self._write_patch_page(block_idx, agg_patch_k, agg_patch_v)
@@ -511,7 +577,7 @@ class FlashInferKVCacheManager:
             # Last page is a patch page.  We wrote patches_per_frame tokens (0..P-1);
             # positions P..page_size-1 are zero padding.  Tell FlashInfer the true
             # valid count so it doesn't read beyond the real tokens.
-            return self.patches_per_frame
+            return self.cache_patches_per_frame
 
         tail = self.special_token_count[block_idx] % self.page_size
         return self.page_size if tail == 0 else tail
@@ -616,7 +682,7 @@ class FlashInferKVCacheManager:
         # this is equivalent to a full-page write.  When page_size > patches_per_frame
         # (rounded up for FA3 alignment, e.g. page_size=1024 for patches_per_frame=999),
         # positions patches_per_frame..page_size-1 remain zero (kv_caches is zero-init).
-        P = self.patches_per_frame
+        P = self.cache_patches_per_frame
 
         if self.kv_cache_fp8:
             # Quantize to FP8 using current scales

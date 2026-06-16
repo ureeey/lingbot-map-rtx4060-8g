@@ -128,6 +128,7 @@ class GCTStream(GCTBase):
         # Camera head iterative refinement (lower = faster inference; default 4)
         camera_num_iterations: int = 4,
         kv_cache_fp8: bool = False,  # If True, store KV cache in FP8 (FlashInfer only)
+        kv_cache_cut: int = 1,
         gqa_ratio: int = 1,  # Group Query Attention ratio; set >1 to reduce KV cache size at potential quality cost
     ):
         """
@@ -181,6 +182,7 @@ class GCTStream(GCTBase):
         self.use_sdpa = use_sdpa
         self.camera_num_iterations = camera_num_iterations
         self.kv_cache_fp8 = kv_cache_fp8
+        self.kv_cache_cut = kv_cache_cut
         self.gqa_ratio = gqa_ratio
 
         # Call base class __init__ (will call _build_aggregator)
@@ -233,6 +235,7 @@ class GCTStream(GCTBase):
             kv_cache_camera_only=self.kv_cache_camera_only,
             use_gradient_checkpoint=self.use_gradient_checkpoint,
             kv_cache_fp8=self.kv_cache_fp8,
+            kv_cache_cut=self.kv_cache_cut,
             gqa_ratio=self.gqa_ratio,
         )
 

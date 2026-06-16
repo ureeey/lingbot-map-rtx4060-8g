@@ -98,6 +98,7 @@ def load_model(args, device, num_frames):
         use_sdpa=args.use_sdpa,
         camera_num_iterations=args.camera_num_iterations,
         kv_cache_fp8=args.kv_cache_fp8,
+        kv_cache_cut=args.kv_cache_cut,
         gqa_ratio=args.gqa_ratio,
     )
 
@@ -378,6 +379,8 @@ def main():
                              "  the whole model -> Float8DynamicActivationFloat8WeightConfig \n")
     parser.add_argument("--kv_cache_fp8", action="store_true", default=False,
                         help="Store KV cache in FP8 (FlashInfer only).")
+    parser.add_argument("--kv_cache_cut", type=int, default=1,
+                    help="Store KV cache by downsampled with Factor (FlashInfer only).")
     parser.add_argument("--gqa_ratio", type=int, default=1,
                         help="Deprecated !!! Fixed 1.\n" \
                         "Group Query Attention ratio. Default: 1, no GQA; set >1 to reduce KV cache size at a potential quality cost.")
@@ -446,7 +449,7 @@ def main():
 #    model.camera_head = model.camera_head.to(dtype=torch.float16) # expected scalar type Float but found Half
 #    model.depth_head = model.depth_head.to(dtype=torch.float16) # expected scalar type Float but found Half
 
-    print(f"量化前模型实际内存占用: {get_model_size_in_bytes(model) / (1024**3):.2f} GB") if args.quant_wa != "none" else None
+    print(f"[ 量化前模型占用内存: {get_model_size_in_bytes(model) / (1024**3):.2f} GB ]") if args.quant_wa != "none" else None
 
     if args.quant_wa == "int":
         # 5 - torchao 的权重量化 INT4，必须放在在 model.aggregator 转 bf16 之后
@@ -462,7 +465,7 @@ def main():
     elif args.quant_wa == "fp8":
         quantize_(model, Float8DynamicActivationFloat8WeightConfig())
 
-    print(f"量化后模型实际内存占用: {get_model_size_in_bytes(model) / (1024**3):.2f} GB") if args.quant_wa != "none" else None
+    print(f"[ 量化后模型占用内存: {get_model_size_in_bytes(model) / (1024**3):.2f} GB ]") if args.quant_wa != "none" else None
 
     if 0:
         dummy_input = torch.randn(1, 3, 518, 294, dtype=torch.bfloat16).cuda()
@@ -536,7 +539,7 @@ def main():
         print(f"  compiled warmup: {time.time() - t_warm:.1f}s")
 
     # ── Inference ────────────────────────────────────────────────────────────
-    print(f"Running {args.mode} inference (dtype={dtype})...")
+    print(f"\n    Running {args.mode} inference...\n")
     t0 = time.time()
 
     output_device = torch.device("cpu") if args.offload_to_cpu else None
@@ -564,7 +567,7 @@ def main():
                 output_device=output_device,
             )
 
-    print(f"Inference done in {time.time() - t0:.1f}s")
+    print(f"\n    Inference done in {time.time() - t0:.1f}s\n")
 
     # ── Aggressive memory cleanup before post-processing ─────────────────────
     print("Cleaning up inference memory...")
@@ -579,12 +582,16 @@ def main():
     predictions, images_cpu = postprocess(predictions, image_size_hw=(h, w), images=None)
 
     os.makedirs(args.output_dir, exist_ok=True)
-    output_path = os.path.join(args.output_dir, "predictions.pt")
+    output_path = os.path.join(args.output_dir, 
+        f"pred-{os.path.basename(os.path.normpath(args.image_folder))}-"
+        f"f{args.first_k}-s{args.num_scale_frames}-w{args.kv_cache_sliding_window}-"
+        f"q{args.quant_wa}-KV-fp8{args.kv_cache_fp8}-cut{args.kv_cache_cut}.pt")
     
     save_data = {
         'predictions': predictions,
         'paths': paths,
         'resolved_image_folder': resolved_image_folder,
+        'output_path': output_path,
         'image_shape': (h, w),
         'args': vars(args),
     }
@@ -594,9 +601,8 @@ def main():
     else:
         print(f"images_cpu is None, saving only predictions.")
     
-    print(f"Saving predictions to {output_path}...")
     torch.save(save_data, output_path)
-    print(f"Saved successfully!")
+    print(f"Saved prediction to {output_path} ")
 
 if __name__ == "__main__":
     main()

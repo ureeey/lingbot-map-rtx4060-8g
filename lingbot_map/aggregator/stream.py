@@ -50,6 +50,7 @@ class AggregatorStream(AggregatorBase):
         # Window size for memory optimization (windowed mode)
         window_size: int = None,
         kv_cache_fp8: bool = False,  # If True, store KV cache in FP8 (FlashInfer only)
+        kv_cache_cut: int = 1,
         gqa_ratio: int = 1,  # Group Query Attention ratio; set >1 to reduce KV cache size at potential quality cost
         # Base class parameters via **kwargs
         **kwargs
@@ -87,6 +88,7 @@ class AggregatorStream(AggregatorBase):
         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
         self.kv_cache_camera_only = kv_cache_camera_only
         self.kv_cache_fp8 = kv_cache_fp8
+        self.kv_cache_cut = kv_cache_cut
         self.gqa_ratio = gqa_ratio
 
         # Pop kwargs that are passed but not needed by base class
@@ -212,7 +214,7 @@ class AggregatorStream(AggregatorBase):
                 If None, falls back to assuming square images of self.img_size.
         """
         if self.kv_cache_manager is None:
-            if self.kv_cache_fp8 or self.gqa_ratio > 1:
+            if self.kv_cache_fp8 or self.gqa_ratio > 1 or self.kv_cache_cut > 1:
                 from lingbot_map.layers.flashinfer_cache_new import FlashInferKVCacheManager
             else:
                 from lingbot_map.layers.flashinfer_cache import FlashInferKVCacheManager
@@ -223,7 +225,7 @@ class AggregatorStream(AggregatorBase):
                 tokens_per_frame = (self.img_size // self.patch_size) ** 2 + self.num_special_tokens
             # max_num_frames: scale + window + headroom
             max_num_frames = self.kv_cache_scale_frames + self.kv_cache_sliding_window + 16
-            if self.kv_cache_fp8 or self.gqa_ratio > 1:
+            if self.kv_cache_fp8 or self.gqa_ratio > 1 or self.kv_cache_cut > 1:
                 self.kv_cache_manager = FlashInferKVCacheManager(
                     num_blocks=self.depth,
                     max_num_frames=max_num_frames,
@@ -240,6 +242,7 @@ class AggregatorStream(AggregatorBase):
                     fa3=getattr(self, 'kv_cache_fa3', False),
                     window_size=self.window_size,
                     kv_cache_fp8=self.kv_cache_fp8,
+                    kv_cache_cut=self.kv_cache_cut,
                     gqa_ratio=self.gqa_ratio,
                 )
             else:
