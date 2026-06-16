@@ -67,3 +67,33 @@ python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --im
 ```bash
 python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --image_folder example/oxford --output_dir ./output/ --num_scale_frames 2 --quant_new
 ```
+
+9. 详细对比 权重激活量化、KV Cache fp8 量化 和 KV Cache 下采样 对计算资源和运行结果的影响
+
+    *显存峰值、FPS和序列无关，ATE、轨迹平滑程度按 oxford_spires keble-college-02 比较*
+
+    *轨迹平滑程度由肉眼观察*
+
+    *KV Cache 下采样受限于现有的 FlashInfer Page + evict frame/keep special 框架，目前只能对所有帧都做下采样，*
+
+    *实际想要的做法是 scale frame 和 当前帧 不做下采样，滑窗里的帧才做下采样*
+
+```bash
+基准：
+benchmark lingbot_map_stream.yaml
+相当于：
+python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --image_folder example/oxford --output_dir ./output/ --first_k 320 --num_scale_frames 2 --kv_cache_sliding_window 48
+```
+
+| 摘要 | 权重激活量化 | KV Cache fp8 量化 | KV Cache 下采样 | 显存峰值(GB) | FPS | ATE | 轨迹平滑 |
+|-------|-------|-------|-------|-------|-------|-------|-------|
+| 基准 | 禁用 | 禁用 | 禁用 | <span style="color:Chocolate">7.13</span> | <span style="color:Chocolate">3.6</span> | 基准 | 基准 |
+| 单项分析 | int4、int8混合 | - | - | 5.37 | 2.2 | 轻微变化 | 轻微变化 |
+| 单项分析 | fp8 | - | - | 5.68 | 3.7 | 轻微变化 | <span style="color:orange">显著变差</span> |
+| 单项分析 | - | 启用 | - | 5.17 | 3.3 | 轻微变化 | 轻微变化 |
+| 单项分析 | - | - | 启用 | 4.4 | 5.4 | <span style="color:orange">显著变差</span> | 轻微变化 |
+| 最小内存 | int4、int8混合 | 启用 | 启用 | <span style="color:green">**2.05**</span> | 2.7 | <span style="color:orange">显著变差</span> | 轻微变化 |
+| 最快 | fp8 | - | 启用 | 2.96 | <span style="color:green">**5.8**</span> | <span style="color:brown">显著变差</span> | <span style="color:brown">显著变差</span> |
+| 平衡 | int4、int8混合 | 启用 | - | 3.41 | <span style="color:orange">2.1</span> | <span style="color:green">轻微变化</span> | <span style="color:green">轻微变化</span> |
+
+    除了 keble-college-02，还比较了 example 中的 oxford、unversity、loop 以及 indoor_travel 的重建结果，从重建结果反推发现 oxford 的轨迹有大的跳变异常，其他序列的结果是有变差但还不至于异常。

@@ -10,6 +10,7 @@ import logging
 import torch
 import numpy as np
 from typing import Any, Dict, List, Optional
+import time
 
 from benchmark.method.base import BaseMethod
 from benchmark.core.loader import BSSLoader
@@ -68,7 +69,9 @@ class LingbotMapMethod(BaseMethod):
         align: int = 14,
         area_budget: Optional[int] = None,
         logger: Optional[logging.Logger] = None,
-        quant: Optional[bool] = False,
+        quant_wa: Optional[str] = 'none',
+        kv_cache_fp8: Optional[bool] = False,
+        kv_cache_cut: Optional[int] = 1,
         **kwargs,
     ):
         super().__init__(
@@ -95,7 +98,9 @@ class LingbotMapMethod(BaseMethod):
         self.auto_keyframe_threshold = int(auto_keyframe_threshold)
         self.flow_threshold = flow_threshold
         self.max_non_keyframe_gap = max_non_keyframe_gap
-        self.quant = quant
+        self.quant_wa = quant_wa
+        self.kv_cache_fp8 = kv_cache_fp8
+        self.kv_cache_cut = kv_cache_cut
 
         if self.mode not in ('streaming', 'windowed'):
             raise ValueError(f"Invalid mode '{self.mode}'. Must be 'streaming' or 'windowed'")
@@ -166,6 +171,9 @@ class LingbotMapMethod(BaseMethod):
                 kv_cache_cross_frame_special=True,
                 kv_cache_include_scale_frames=True,
                 use_sdpa=self.use_sdpa,
+                kv_cache_fp8=self.kv_cache_fp8,
+                kv_cache_cut=self.kv_cache_cut,
+                gqa_ratio=1,
             )
 
         if self.checkpoint:
@@ -182,12 +190,7 @@ class LingbotMapMethod(BaseMethod):
                 print(f"    Unexpected keys: {len(unexpected)}")
             print("    Checkpoint loaded.")
 
-        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-        print(f"Move model to device: {self.device}")
         self.model = self.model.to(self.device).eval()
-        print(f"已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        print(f"已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
     def _prepare_images(self, rgb_list):
         """Convert list of HxWx3 uint8 numpy arrays to [S, 3, H, W] tensor in [0, 1]."""
@@ -220,14 +223,11 @@ class LingbotMapMethod(BaseMethod):
             print(f"Casting aggregator to {dtype} (heads kept in fp32)")
             self.model.aggregator = self.model.aggregator.to(dtype=dtype)# AFFECT memory_allocated !!!
 
-        if self.quant:
-            from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig
-            from torchao.utils import get_model_size_in_bytes
+        from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig, Float8DynamicActivationFloat8WeightConfig
+        from torchao.utils import get_model_size_in_bytes
 
-            ori_size = get_model_size_in_bytes(self.model) / (1024**3)
-            print(f"量化前模型实际内存占用: {ori_size:.2f} GB")
-
-            # 5 - torchao 的权重量化 IN4，必须放在在 model.aggregator 转 bf16 之后
+        print(f"[ 量化前模型占用内存: {get_model_size_in_bytes(self.model) / (1024**3):.2f} GB ]") if self.quant_wa != "none" else None
+        if self.quant_wa == "int":
             config = Int4WeightOnlyConfig(
                 group_size=32,
                 int4_packing_format="tile_packed_to_4d",
@@ -237,14 +237,13 @@ class LingbotMapMethod(BaseMethod):
             quantize_(self.model.aggregator, config)
             quantize_(self.model.camera_head, Int8WeightOnlyConfig())
             quantize_(self.model.depth_head, Int8WeightOnlyConfig())
-            
-            quantized_size = get_model_size_in_bytes(self.model) / (1024**3)
-            print(f"量化后模型实际内存占用: {quantized_size:.2f} GB")
-
-            print(f"量化 之后 已分配: {torch.cuda.memory_allocated() / 1024**3:.2f} GB ，已缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-
-        print(f"  → Running {self.mode} inference (dtype: {dtype})")
-
+        elif self.quant_wa == "fp8":
+            quantize_(self.model, Float8DynamicActivationFloat8WeightConfig())
+        print(f"[ 量化后模型占用内存: {get_model_size_in_bytes(self.model) / (1024**3):.2f} GB ]") if self.quant_wa != "none" else None
+        
+        print(f"  → Running {self.mode} inference...")
+        t0 = time.time()
+        torch.cuda.reset_peak_memory_stats(self.device)
         num_frames = images.shape[0]
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
             if self.mode == 'streaming':
@@ -283,6 +282,10 @@ class LingbotMapMethod(BaseMethod):
                     max_non_keyframe_gap=self.max_non_keyframe_gap,
                     output_device=torch.device("cpu"),
                 )
+
+        t_infer = time.time() - t0
+        print(f"\n    Inference done in {t_infer:.1f}s, FPS = {num_frames / t_infer:.1f} \n")
+        print(f"[ allocated 显存峰值：{torch.cuda.max_memory_allocated(self.device) / (1024**3):.2f} GB ]")
 
         return predictions
 

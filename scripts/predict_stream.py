@@ -541,6 +541,7 @@ def main():
     # ── Inference ────────────────────────────────────────────────────────────
     print(f"\n    Running {args.mode} inference...\n")
     t0 = time.time()
+    torch.cuda.reset_peak_memory_stats(device)
 
     output_device = torch.device("cpu") if args.offload_to_cpu else None
     
@@ -567,7 +568,9 @@ def main():
                 output_device=output_device,
             )
 
-    print(f"\n    Inference done in {time.time() - t0:.1f}s\n")
+    t_infer = time.time() - t0
+    print(f"\n    Inference done in {t_infer:.1f}s, FPS = {num_frames / t_infer:.1f} \n")
+    print(f"[ allocated 显存峰值：{torch.cuda.max_memory_allocated(device) / (1024**3):.2f} GB ]")
 
     # ── Aggressive memory cleanup before post-processing ─────────────────────
     print("Cleaning up inference memory...")
