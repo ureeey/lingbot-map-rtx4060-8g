@@ -49,7 +49,15 @@ from lingbot_map.utils.geometry import closed_form_inverse_se3_general
 from lingbot_map.utils.loadimage import load_images,LazyImageWrapper
 
 import torch.ao.quantization as quant
-from torchao.quantization import quantize_, Int8WeightOnlyConfig, Int4WeightOnlyConfig, Float8DynamicActivationFloat8WeightConfig, Float8WeightOnlyConfig
+from torchao.quantization import (
+    quantize_, 
+    Int4WeightOnlyConfig,
+    Int8WeightOnlyConfig, 
+    Float8WeightOnlyConfig,
+    Float8DynamicActivationFloat8WeightConfig, 
+    Int8DynamicActivationInt8WeightConfig,
+    Float8DynamicActivationInt4WeightConfig # 不支持 hqq，无法绕过 mslk，所以用不了
+    )
 from torchinfo import summary
 from torchao.utils import get_model_size_in_bytes
 def quantize_linear_to_int8(module):
@@ -132,17 +140,19 @@ def compile_model(model):
     Mirrors the targets in gct_profile.py:compile_model. Unlike the profile script,
     `model.point_head` is **kept** — the demo needs world_points for visualization.
     """
+    mode = "default" # max-autotune, reduce-overhead, default
+    # 推理速度一样，但是 default warmup 时间最短
     agg = model.aggregator
     for i, b in enumerate(agg.frame_blocks):
-        agg.frame_blocks[i] = torch.compile(b, mode="reduce-overhead")
+        agg.frame_blocks[i] = torch.compile(b, mode=mode)
     for i, b in enumerate(agg.patch_embed.blocks):
-        agg.patch_embed.blocks[i] = torch.compile(b, mode="reduce-overhead")
+        agg.patch_embed.blocks[i] = torch.compile(b, mode=mode)
     for b in agg.global_blocks:
         if hasattr(b, 'attn_pre'):
-            b.attn_pre = torch.compile(b.attn_pre, mode="reduce-overhead")
+            b.attn_pre = torch.compile(b.attn_pre, mode=mode)
         if hasattr(b, 'ffn_residual'):
-            b.ffn_residual = torch.compile(b.ffn_residual, mode="reduce-overhead")
-        b.attn.proj = torch.compile(b.attn.proj, mode="reduce-overhead")
+            b.ffn_residual = torch.compile(b.ffn_residual, mode=mode)
+        b.attn.proj = torch.compile(b.attn.proj, mode=mode)
 
 
 def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype,
@@ -368,7 +378,7 @@ def main():
                              "Recommended for long sequences (>200 frames).")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Directory to save prediction results (.pt file)")
-    parser.add_argument("--quant_wa", type=str, default="none", choices=["none", "int", "fp8"],
+    parser.add_argument("--quant_wa", type=str, default="none", choices=["none", "mix", "fp8", "int8", "fp8w", "int8w", "int4w"],
                         help="quantization for weights and activations.\n" \
                              "none: no quantization\n"
                              "int:\n"
@@ -451,19 +461,33 @@ def main():
 
     print(f"[ 量化前模型占用内存: {get_model_size_in_bytes(model) / (1024**3):.2f} GB ]") if args.quant_wa != "none" else None
 
-    if args.quant_wa == "int":
+    if args.quant_wa == "mix":
         # 5 - torchao 的权重量化 INT4，必须放在在 model.aggregator 转 bf16 之后
         config = Int4WeightOnlyConfig(
             group_size=32,
             int4_packing_format="tile_packed_to_4d",
             int4_choose_qparams_algorithm="hqq"  # ✅ 选择 HQQ 算法，绕过 mslk
         )
-
         quantize_(model.aggregator, config)
-        quantize_(model.camera_head, Int8WeightOnlyConfig())
-        quantize_(model.depth_head, Int8WeightOnlyConfig())
+        quantize_(model.camera_head, Float8DynamicActivationFloat8WeightConfig())
+        quantize_(model.depth_head, Float8DynamicActivationFloat8WeightConfig())
     elif args.quant_wa == "fp8":
         quantize_(model, Float8DynamicActivationFloat8WeightConfig())
+    elif args.quant_wa == "int8":
+        quantize_(model, Int8DynamicActivationInt8WeightConfig())
+    elif args.quant_wa == "fp8w":
+        quantize_(model, Float8WeightOnlyConfig())
+    elif args.quant_wa == "int8w":
+        quantize_(model, Int8WeightOnlyConfig())
+    elif args.quant_wa == "int4w":
+        config = Int4WeightOnlyConfig(
+            group_size=32,
+            int4_packing_format="tile_packed_to_4d",
+            int4_choose_qparams_algorithm="hqq"
+        )
+        quantize_(model.aggregator, config)
+        # camera_head 和 depth_head 保留 float32，无法转换为 int4
+
 
     print(f"[ 量化后模型占用内存: {get_model_size_in_bytes(model) / (1024**3):.2f} GB ]") if args.quant_wa != "none" else None
 
@@ -545,6 +569,12 @@ def main():
 
     output_device = torch.device("cpu") if args.offload_to_cpu else None
     
+    # with torch.profiler.profile(
+    #     activities=[
+    #         torch.profiler.ProfilerActivity.CUDA
+    #     ],
+    #     ) as prof:
+    # with torch.profiler.record_function("inference_streaming"):
     with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
         if args.lazyloader:
             images_wrapper = LazyImageWrapper(
@@ -571,6 +601,15 @@ def main():
     t_infer = time.time() - t0
     print(f"\n    Inference done in {t_infer:.1f}s, FPS = {num_frames / t_infer:.1f} \n")
     print(f"[ allocated 显存峰值：{torch.cuda.max_memory_allocated(device) / (1024**3):.2f} GB ]")
+
+    # print(prof.key_averages().table(
+    #     # sort_by="cuda_time_total", 
+    #     # row_limit=30
+    #     row_limit=1
+    # ))
+    # prof.export_chrome_trace("gct_trace.json")
+    # print("\n已导出 trace 文件: gct_trace.json")
+    # print("在 Chrome 浏览器中打开 chrome://tracing 并加载该文件查看可视化结果")
 
     # ── Aggressive memory cleanup before post-processing ─────────────────────
     print("Cleaning up inference memory...")
