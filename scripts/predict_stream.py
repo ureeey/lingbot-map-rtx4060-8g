@@ -58,7 +58,6 @@ from torchao.quantization import (
     Int8DynamicActivationInt8WeightConfig,
     Float8DynamicActivationInt4WeightConfig # 不支持 hqq，无法绕过 mslk，所以用不了
     )
-from torchinfo import summary
 from torchao.utils import get_model_size_in_bytes
 def quantize_linear_to_int8(module):
     """纯PyTorch INT8逐通道权重量化，零依赖"""
@@ -492,12 +491,28 @@ def main():
     print(f"[ 量化后模型占用内存: {get_model_size_in_bytes(model) / (1024**3):.2f} GB ]") if args.quant_wa != "none" else None
 
     if 0:
-        dummy_input = torch.randn(1, 3, 518, 294, dtype=torch.bfloat16).cuda()
-        summary(
+        from torchinfo import summary
+        from contextlib import redirect_stdout
+        from torchvista import trace_model
+        import torch.onnx as onnx
+        dummy_input = torch.randn(2, 3, 518, 294, dtype=torch.bfloat16).cuda()
+        # with open("model_summary.txt", "w") as f:
+        #     with redirect_stdout(f):
+        #         summary(model, input_data=dummy_input, depth=10)
+        # trace_model(
+        #     model,
+        #     inputs=dummy_input,
+        #     export_path="model_interactive_10frames.html"
+        # )
+        # import warnings
+        # # 屏蔽ONNX dynamo参数注解冗余警告
+        # warnings.filterwarnings("ignore", message="Missing annotation for parameter")
+        onnx.export(
             model,
-            input_data=dummy_input,
-            depth=1
+            dummy_input,
+            dynamo=True
         )
+        exit(0)
 
     if args.keyframe_interval is None:
         args.keyframe_interval = (num_frames + 319) // 320

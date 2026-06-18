@@ -407,6 +407,20 @@ class WanRotaryPosEmbed(nn.Module):
             # 这样 patches 与 special tokens 位置不冲突，且 h,w 对称处理
             # Shape: (ppf, pph, ppw, dim)
             freqs_f = freqs[0][frame_slice].reshape(ppf, 1, 1, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_f) 帧维度
+
+            slice_start = patch_start_idx
+            slice_end = patch_start_idx + pph
+            slice_part = freqs[1][slice_start:slice_end]
+
+            # 强制校验行数匹配，抛出明确错误，不再静默越界截断
+            if slice_part.size(0) != pph:
+                raise RuntimeError(
+                    f"RoPE height freq slice out of range!\n"
+                    f"freqs[1].shape = {freqs[1].shape}\n"
+                    f"slice [{slice_start}:{slice_end}], got rows={slice_part.size(0)}, need pph={pph}"
+                )
+
+
             freqs_h = freqs[1][patch_start_idx : patch_start_idx + pph].reshape(1, pph, 1, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_h) 高度从patch_start_idx开始
             freqs_w = freqs[2][patch_start_idx : patch_start_idx + ppw].reshape(1, 1, ppw, -1).expand(ppf, pph, ppw, -1)  # (ppf, pph, ppw, dim_w) 宽度从patch_start_idx开始
             freqs_patches = torch.cat([freqs_f, freqs_h, freqs_w], dim=-1)  # (ppf, pph, ppw, dim) 拼接三维

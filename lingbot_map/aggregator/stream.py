@@ -291,10 +291,15 @@ class AggregatorStream(AggregatorBase):
         num_heads = 16
         head_dim = self.embed_dim // num_heads
 
+        # 像 FlashInfer KV cache 预分配一样，max_seq_len 也依赖 max_frame_num
+        # 这不够流式
+        # 之前处于省显存考虑，把 max_frame_num 从固定 1024 改为回灌图片序列长度，
+        # 当序列长度很小时，3D RoPE 内部的 slice 操作会越界
+        # 这里暂且改为固定 1024
         self.rope3d = WanRotaryPosEmbed(
             attention_head_dim=head_dim,
             patch_size=(1, self.patch_size, self.patch_size),
-            max_seq_len=self.max_frame_num,
+            max_seq_len= 1024 # self.max_frame_num,
         )
         logger.info(f"3D RoPE initialized for max {self.max_frame_num} frames, head_dim={head_dim}")
 
