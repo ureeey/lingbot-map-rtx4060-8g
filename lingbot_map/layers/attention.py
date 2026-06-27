@@ -511,6 +511,7 @@ class FlashInferAttention(Attention):
                         num_register_tokens=num_register_tokens,
                     )
             else:
+                # NEVER REACH THIS CODE PATH
                 # Phase 2: single-frame streaming via FlashInfer paged attention.
                 q_nhd, k_nhd, v_nhd = self.prepare_qkv(x, pos=pos, enable_3d_rope=enable_3d_rope)
 

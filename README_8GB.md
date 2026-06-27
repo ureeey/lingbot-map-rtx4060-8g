@@ -97,3 +97,24 @@ python scripts/predict_stream.py --model_path ../models/lingbot-map-long.pt --im
 | 平衡 | int4、int8混合 | 启用 | - | 3.41 | <span style="color:orange">2.1</span> | <span style="color:green">轻微变化</span> | <span style="color:green">轻微变化</span> |
 
     除了 keble-college-02，还比较了 example 中的 oxford、unversity、loop 以及 indoor_travel 的重建结果，从重建结果反推发现 oxford 的轨迹有大的跳变异常，其他序列的结果是有变差但还不至于异常。
+
+10. 尝试分析注意力矩阵
+
+    *此部分仅为简单尝试，更加完备的分析可以参考 AVGGT、RetrieveVGGT 等论文*
+    
+    条件断点设在 FlashInferKVCacheManager：：compute_attention 的 self.prefill_wrapper.run 位置，条件为 block_idx == 23，在第 7 帧的时候开始后续操作。
+    
+    先按照 debug_console.py 中的的方法在调试断点生成并保存注意力矩阵，然后使用 attn_vis.py 生成可视化结果。
+
+    由于混合了 patch tokens 和 special tokens，因此需要分开处理。
+
+```bash
+python scripts/helper/attn_vis.py output/attn_analysis/7th_frame_global_block_idx_23.pt --mode heatmap --head 0,4,9,10 --kv-sp 42 --q-sp 6 --cols 2
+```
+
+![Logo](assets/patch_tokens_attn_vis.png)
+
+```bash
+python scripts/helper/attn_vis.py output/attn_analysis/7th_frame_global_block_idx_23.pt --mode heatmap --head 0-15 --kv-patch 5439 --q-patch 777 --cols 4
+```
+![Logo](assets/special_tokens_attn_vis.png)
